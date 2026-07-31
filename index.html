@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adaptation Radar — book-to-screen scouting</title>
+<meta name="description" content="Ranks books by adaptation potential using live reader, attention and discussion signals.">
+<link rel="stylesheet" href="assets/css/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark"></span>
+    <h1>Adaptation Radar</h1>
+    <span class="sub">book &rarr; screen scouting</span>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn" id="scan-btn">Re-scan</button>
+    <button class="btn" id="export-btn">Export CSV</button>
+    <button class="btn" id="settings-btn">Settings</button>
+  </div>
+</header>
+
+<div class="statusbar">
+  <p id="status">Loading slate…</p>
+  <div id="progress-bar" hidden><i></i></div>
+</div>
+
+<main>
+  <aside class="sidebar">
+    <section>
+      <h2>Scoring weights</h2>
+      <p class="dim tiny">The model is yours to argue with. Drag to re-rank the board live.</p>
+      <div id="weights"></div>
+      <button class="btn btn-sm" id="reset-weights">Reset to defaults</button>
+    </section>
+
+    <section>
+      <h2>Add a title</h2>
+      <form id="add-form">
+        <input id="add-title" placeholder="Title" required>
+        <input id="add-author" placeholder="Author (optional)">
+        <button class="btn btn-sm btn-primary" type="submit">Scan title</button>
+      </form>
+    </section>
+
+    <section class="legend">
+      <h2>How to read it</h2>
+      <p><strong>APS</strong> is the weighted Adaptation Potential Score, 0&ndash;100.
+      Every number is computed at load time from public APIs — nothing is pre-baked.</p>
+      <p><em>Thin data</em> means fewer than half the sources returned usable signal.
+      Treat those scores as a prompt to look manually, not as a verdict.</p>
+    </section>
+  </aside>
+
+  <section class="board-wrap">
+    <div class="board-head">
+      <div class="filters">
+        <button class="filter is-on" data-filter="all">Board</button>
+        <button class="filter" data-filter="watchlist">Watchlist</button>
+        <button class="filter" data-filter="clear">Lane clear</button>
+        <button class="filter" data-filter="passed">Passed</button>
+      </div>
+      <input id="search" type="search" placeholder="Filter by title, author, subject…">
+      <span id="count" class="dim tiny"></span>
+    </div>
+    <ol id="board" class="board"></ol>
+  </section>
+
+  <section id="detail" class="detail"></section>
+</main>
+
+<dialog id="settings">
+  <h2>Settings</h2>
+  <label class="field">
+    <span>Anthropic API key <span class="dim">(optional)</span></span>
+    <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off">
+  </label>
+  <p class="dim tiny">Used only to generate written coverage with Claude, called directly from this
+  browser. The key is stored in this browser's localStorage and is never sent anywhere but
+  api.anthropic.com. Leave blank to stay fully templated.</p>
+  <div class="dialog-actions">
+    <button class="btn btn-sm" id="clear-cache">Clear signal cache</button>
+    <span class="spacer"></span>
+    <button class="btn btn-sm" id="settings-close">Close</button>
+    <button class="btn btn-sm btn-primary" id="save-key">Save</button>
+  </div>
+</dialog>
+
+<script type="module" src="assets/js/app.js"></script>
+</body>
+</html>
