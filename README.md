@@ -34,6 +34,49 @@ It also produces, per title:
 - watchlist / pass verdicts and free-text notes, saved locally
 - CSV export of the whole board
 
+## The slope, not the level
+
+A live scan tells you where a title stands today. That is the wrong shape for scouting: a
+book at APS 71 that was 52 three weeks ago is a completely different call from one that has
+sat at 71 since spring. The first is moving; the second is already priced in. Level is what
+everyone can see - the slope is the edge.
+
+So a scheduled job runs the same scan twice a week and commits a dated snapshot to
+`data/history/`. The board then reads those files and adds:
+
+- a **plus/minus badge** on any title whose APS moved by a point or more, with a tooltip
+  naming the window and the factor that drove it
+- a **Movers** panel - the biggest risers and fallers, each attributed to a factor, because
+  "+9" is trivia and "+9, mostly momentum" is a lead
+- a **trend line** in the detail panel, kept visually distinct from the pageviews sparkline
+  beside it: one shows attention, the other shows the score, and a title where those two
+  diverge is exactly the title worth opening (attention climbing while the score falls
+  usually means an adaptation was just announced and whitespace collapsed)
+
+Three things about how this is built are deliberate.
+
+**The harvester imports the browser's own modules.** `tools/harvest.mjs` shims `localStorage`
+and then calls the real `gatherSignals` and `scoreBook` - no second implementation. A trend
+line computed by different code than the current score would drift, and a drifting trend
+line is worse than none.
+
+**A snapshot is refused rather than written thin.** `gatherSignals` resolves even when every
+adapter returned `null`, which is right in the browser - one dead source should only dent a
+book's confidence. On a schedule it is a trap: a network blip produces a full slate of
+well-formed zeros that the chart would faithfully render as the day the entire book market
+collapsed. So the harvester checks resolution rate, how many titles came back with *any*
+live signal, and mean confidence, and exits non-zero rather than committing a lie. A missing
+day is honest; a day of zeros is a lie the chart keeps telling.
+
+**History is optional everywhere.** `data/history/` does not exist until the job has run
+once, and a fork may never run it. A missing history means no badges, no Movers panel, no
+trend line - and a board that behaves exactly as it did before. Nothing on the page waits on
+it, either: the fetch runs alongside the scan rather than in front of it.
+
+Snapshots are keyed by book id, so adding or removing slate titles never shifts anyone's
+series, and each snapshot records the weights that produced it - a score is only comparable
+against the weights that made it.
+
 ## Why these sources
 
 The constraint that shaped the build: a static site can only call APIs that are
@@ -76,6 +119,12 @@ no tool:
 - **Books without a Wikipedia article score 0 on Momentum**, which is a real penalty against
   under-covered and non-Anglophone work. The per-factor confidence readout exists so you can
   see when this is happening — titles below 55% confidence are flagged `thin data`.
+- **A trend needs snapshots to exist.** The history starts the first time the scheduled job
+  runs, so a fresh fork shows no movement for its first couple of weeks. The window is
+  capped at 120 snapshots to keep the repo cloneable, and the UI reads the most recent 12.
+- **Deltas are only comparable within one weights regime.** Each snapshot stores the weights
+  it used; if you change `WEIGHTS_DEFAULT`, older snapshots are measuring a different thing
+  and movement across that boundary is an artifact of the model, not the market.
 
 ## Running it
 
@@ -89,6 +138,24 @@ Then open <http://localhost:4788>.
 
 Signals are cached in `localStorage` for 6 hours so you aren't re-hammering public APIs
 while you work through a slate. Clear it from Settings.
+
+### Recording history
+
+The snapshots behind the trend view come from a scheduled GitHub Action
+(`.github/workflows/harvest.yml`), 06:20 UTC on Mondays and Thursdays. Twice a week rather
+than daily because the underlying signals move on the order of weeks - a daily cadence would
+mostly commit noise.
+
+To seed the first one without waiting for the schedule, run the workflow from the Actions
+tab, or locally:
+
+```bash
+node tools/harvest.mjs                # whole slate -> data/history/YYYY-MM-DD.json
+node tools/harvest.mjs --limit 8      # a quick subset while iterating
+node tools/harvest.mjs --keep 30      # keep a shorter window
+```
+
+Needs Node 18+ (for global `fetch`) and no dependencies.
 
 ## Optional: AI-written coverage
 
@@ -126,7 +193,11 @@ assets/js/
   pitch.js     templated coverage + optional Claude call
   store.js     localStorage: slate, verdicts, notes, weights, key
   app.js       state, scan orchestration, rendering
+  history.js   reads data/history, computes deltas, movers and trend paths
 data/slate.json
+data/history/            dated APS snapshots, written by the scheduled harvest
+tools/harvest.mjs        the harvester - reuses sources.js and score.js
+.github/workflows/harvest.yml
 ```
 
 ## License

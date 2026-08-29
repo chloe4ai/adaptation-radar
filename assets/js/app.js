@@ -3,6 +3,7 @@ import { pool, escapeHtml, slug, round, clearCache } from './util.js';
 import { gatherSignals, coverUrl } from './sources.js';
 import { scoreBook, recommendFormat, findComps, FACTOR_LABELS, FACTOR_BLURBS } from './score.js';
 import { buildTemplatedPitch, generateAIPitch } from './pitch.js';
+import { loadHistory, delta, movers, trendPath } from './history.js';
 import * as store from './store.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -15,6 +16,7 @@ const state = {
   verdicts: store.getVerdicts(),
   notes: store.getNotes(),
   selectedId: null,
+  history: null,       // null until the harvest has run; the board works without it
   filter: 'all',
   query: '',
   scanning: false,
@@ -35,7 +37,18 @@ async function init() {
   state.slate = slate;
 
   renderEmpty();
+
+  // Fire the history fetch alongside the scan rather than before it: the board
+  // must not wait on an optional file, and a repo that has never run the
+  // harvest has no history to wait for.
+  const histReady = loadHistory().then((h) => {
+    state.history = h;
+    renderMovers();
+    if (state.books.length) render();
+  });
+
   await scan();
+  await histReady;
 }
 
 /* --------------------------------- scan ----------------------------------- */
@@ -163,9 +176,62 @@ function rowHtml(b, rank) {
         ${statusFlag(b.score.factors.whitespace)}
         ${conf < 55 ? `<span class="flag flag-thin">thin data ${conf}%</span>` : ''}
       </span>
+      ${deltaBadge(b.id)}
       <span class="spark">${sparkline(b.signals.pv?.series || [])}</span>
       <span class="aps ${bandClass(b.score.aps)}">${round(b.score.aps, 0)}</span>
     </li>`;
+}
+
+/**
+ * Absent history, this renders nothing at all rather than a placeholder: an
+ * empty badge column on a board that has never been harvested would be a
+ * promise the page cannot keep.
+ */
+function deltaBadge(id) {
+  const d = delta(state.history, id);
+  if (!d) return '';
+  // A column of "0" badges down a board of stable titles is noise pretending to
+  // be information. Only titles that actually moved get one.
+  if (Math.abs(d.change) < 1) return '';
+  const cls = d.change > 0 ? 'delta-up' : 'delta-down';
+  const sign = d.change > 0 ? '+' : '';
+  const why = d.driver ? `, mostly ${d.driver}` : '';
+  const over = d.days ? ` over ${d.days}d` : '';
+  return `<span class="delta ${cls}" title="APS ${d.from} to ${d.to}${over}${why}">${sign}${d.change}</span>`;
+}
+
+function renderMovers() {
+  const panel = $('#movers-panel');
+  const list = movers(state.history, 5);
+  if (!list.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+  $('#movers').innerHTML = list.map((m) => {
+    const cls = m.change > 0 ? 'delta-up' : 'delta-down';
+    const sign = m.change > 0 ? '+' : '';
+    return `<li data-id="${m.id}">
+      <span class="delta ${cls}">${sign}${m.change}</span>
+      <span class="mover-title">${escapeHtml(m.title)}</span>
+      ${m.driver ? `<span class="mover-why">${escapeHtml(m.driver)}</span>` : ''}
+    </li>`;
+  }).join('');
+  $('#movers').querySelectorAll('li').forEach((el) => {
+    el.addEventListener('click', () => selectBook(el.dataset.id));
+  });
+  const n = state.history?.snaps?.length || 0;
+  $('#movers-foot').textContent =
+    `${n} snapshot${n === 1 ? '' : 's'}, latest ${state.history?.latest?.date || '—'}.`;
+}
+
+function trendSvg(id) {
+  const d = delta(state.history, id);
+  if (!d) return '';
+  const path = trendPath(d.points);
+  if (!path) return '';
+  const sign = d.change > 0 ? '+' : '';
+  return `<div class="trend-line">
+    <span class="trend"><svg viewBox="0 0 96 24" aria-hidden="true"><path d="${path}"/></svg></span>
+    <span class="dim tiny">APS ${d.from} &rarr; ${d.to} (${sign}${d.change}) across ${d.span} snapshots${d.driver ? `, driven by ${escapeHtml(d.driver)} ${d.driverChange > 0 ? '+' : ''}${d.driverChange}` : ''}</span>
+  </div>`;
 }
 
 function sparkline(series) {
@@ -202,6 +268,7 @@ function renderDetail(b) {
           <span class="aps-big ${bandClass(b.score.aps)}">${round(b.score.aps, 1)}</span>
           <span class="aps-label">Adaptation Potential<br><span class="dim">${Math.round(b.score.confidence * 100)}% data confidence</span></span>
         </p>
+        ${trendSvg(b.id)}
         <div class="verdict-row">
           <button class="btn ${v === 'watchlist' ? 'btn-on' : ''}" data-act="watchlist">${v === 'watchlist' ? '✓ Watching' : 'Add to watchlist'}</button>
           <button class="btn ${v === 'pass' ? 'btn-on' : ''}" data-act="pass">${v === 'pass' ? '✓ Passed' : 'Pass'}</button>
