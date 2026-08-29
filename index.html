@@ -45,12 +45,23 @@
       </form>
     </section>
 
+    <section id="movers-panel" hidden>
+      <h2>Movers</h2>
+      <p class="dim tiny">Change in APS across the recorded snapshots &mdash; the slope,
+      not the level.</p>
+      <ul id="movers" class="movers"></ul>
+      <p class="dim tiny" id="movers-foot"></p>
+    </section>
+
     <section class="legend">
       <h2>How to read it</h2>
       <p><strong>APS</strong> is the weighted Adaptation Potential Score, 0&ndash;100.
       Every number is computed at load time from public APIs — nothing is pre-baked.</p>
       <p><em>Thin data</em> means fewer than half the sources returned usable signal.
       Treat those scores as a prompt to look manually, not as a verdict.</p>
+      <p>A <strong>&plus;/&minus; badge</strong> appears once the scheduled harvest has
+      recorded more than one snapshot. It is the change in APS since the oldest one
+      held, which is the number a live-only board cannot give you.</p>
     </section>
   </aside>
 

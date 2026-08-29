@@ -159,6 +159,28 @@ textarea { resize: vertical; font-size: 13px; }
 .flag-pass  { color: var(--ink-faint); }
 .flag-thin  { color: var(--mid); border-color: #24384a; }
 
+/* APS trend: deliberately distinct from the pageviews sparkline next to it.
+   One shows attention, the other shows the score, and a title where those two
+   diverge is exactly the title worth opening. */
+.trend svg { width: 96px; height: 24px; display: block; }
+.trend path { fill: none; stroke: var(--accent); stroke-width: 1.4; }
+.delta { font-variant-numeric: tabular-nums; font-size: 11px; padding: 1px 5px;
+  border-radius: 3px; border: 1px solid transparent; white-space: nowrap; }
+.delta-up   { color: var(--clear); border-color: #27482f; }
+.delta-down { color: var(--hot); border-color: #4a2a1e; }
+.delta-flat { color: var(--ink-faint); }
+
+.movers { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.movers li { display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+  cursor: pointer; min-width: 0; }
+.movers li:hover .mover-title { text-decoration: underline; }
+.mover-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.mover-why { flex: 0 0 auto; color: var(--ink-faint); font-size: 11px; }
+.movers .delta { flex: 0 0 auto; }
+
+.trend-line { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+
 .spark svg { width: 60px; height: 18px; display: block; }
 .spark path { fill: none; stroke: var(--ink-faint); stroke-width: 1.2; }
 .row:hover .spark path, .row.is-selected .spark path { stroke: var(--accent); }

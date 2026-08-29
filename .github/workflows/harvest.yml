@@ -1,0 +1,54 @@
+name: Harvest APS snapshot
+
+# The board scores live in the browser, which tells you where a title stands now.
+# This job runs the same scoring on a schedule and commits the result, so the
+# board can also tell you which way a title is moving.
+on:
+  schedule:
+    # 06:20 UTC on Mondays and Thursdays. Twice a week, because the underlying
+    # signals (Wikimedia pageviews, Open Library reader counts) move on the order
+    # of weeks -- daily snapshots would mostly commit noise.
+    - cron: '20 6 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Only scan the first N titles (0 = whole slate)'
+        required: false
+        default: '0'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harvest
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Harvest
+        run: node tools/harvest.mjs --limit "${{ github.event.inputs.limit || 0 }}"
+
+      - name: Commit snapshot
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain data/history)" ]; then
+            echo "no change to commit"
+            exit 0
+          fi
+          git config user.name  "adaptation-radar[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/history
+          git commit -m "data: APS snapshot $(date -u +%Y-%m-%d)"
+          # Another run may have landed while this one was scanning; rebase rather
+          # than force, so a concurrent snapshot is never thrown away.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
