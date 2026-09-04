@@ -1,205 +1,72 @@
 # Adaptation Radar
 
-A book-to-screen scouting board. It ranks books by how well they'd travel to film or
-television, using **live public data** — no pre-baked dataset, no backend, no API key
-required.
+**Rank by the slope of attention, not the level. The level is already priced in.**
 
-Built as a static site: open it and every number on screen is computed in your browser
-from public APIs at load time.
+A scoring problem: fuse six noisy, partly-missing public signals into one 0–100 ranking and make movement in that ranking legible — in the browser, no backend, no dataset, no API key. The test case is books that could travel to film or television; the books are the fixture, the method is the point.
+
+▶ **[Live demo](https://chloe4ai.github.io/adaptation-radar/)** — 48 titles, every number computed in your browser at load
 
 ---
 
-## What it does
+## The product argument
 
-For each book on the slate it pulls live signals from four public sources and combines
-them into an **Adaptation Potential Score (APS)** out of 100:
+**1. The score is the level; the edge is the slope.**
+A book at 71 that was 52 three weeks ago is a different call from one that has sat at 71 since spring. So a scheduled job (`harvest.yml`, 06:20 UTC Mondays and Thursdays) commits a dated snapshot to `data/history/` and the board reads the last 12 — twice weekly, not daily, because these signals move on the order of weeks. Deltas are always attributed: a factor is named as driver only when it supplied 3+ points of the change, because "+9" is trivia and "+9, mostly momentum" is a lead.
 
-| Factor | Weight | Source | What it measures |
-|---|---|---|---|
-| **Momentum** | 25 | Wikimedia Pageviews | 30-day attention volume and its trend against the prior 60-day baseline |
-| **Readership** | 20 | Open Library | Want-to-read, finished-reader and rating counts, quality-adjusted |
-| **Discussion** | 15 | HN Algolia | Full-text mention volume, all-time and last 12 months |
-| **Adaptability** | 20 | Open Library + Google Books | Genre affinity, page count, high-concept markers, series and award signals |
-| **Whitespace** | 12 | Wikipedia | Whether a screen adaptation already exists or is in development |
-| **Rights** | 8 | Open Library | Likely rights availability inferred from publication year |
+**2. The harvester imports the browser's own modules.**
+`tools/harvest.mjs` shims `localStorage` and calls the real `gatherSignals` and `scoreBook`. A trend line computed by different code than the current score drifts, and a drifting trend line is worse than none.
 
-Every weight is a slider. The board re-ranks live as you drag, so the model is something
-you argue with rather than something you accept.
+**3. A snapshot is refused rather than written thin.**
+`gatherSignals` resolves even when every adapter returned `null`, which is right in the browser: one dead source should only dent a book's confidence. On a schedule it is a trap: a blip yields a slate of well-formed zeros the chart renders as the day the book market collapsed. So the harvester exits non-zero under three checks — 60% of the slate resolved, 60% of those carrying a live signal, mean confidence 0.35. A missing day is honest; a day of zeros is a lie the chart keeps telling.
 
-It also produces, per title:
+**4. Missing data lowers confidence. It is never imputed.**
+Every factor returns a 0–1 confidence beside its score and composite confidence is their weighted average, so a book scored off two working sources reads as thin — flagged below 55% — not authoritative. Weights are sliders, and each snapshot stores the weights that made it: a delta is only comparable inside one weights regime.
 
-- a **format read** (feature / limited series / returning series / animated) with the reasoning
-- **comparables** drawn from the rest of the scanned slate, weighted by subject rarity
-- **development coverage** — a logline, why-now, risks and a verdict
-- watchlist / pass verdicts and free-text notes, saved locally
-- CSV export of the whole board
+**5. Source resolution is scored, not trusted.**
+Open Library's ranking is not title matching: search a novel and it returns an academic study about it, or a boxed set. Candidates are pooled from two queries, filtered to the named author, rejected on omnibus and later-volume patterns, then scored — exact title +100, English edition +18 — and anything under the cutoff resolves to nothing. Thin data beats a number attached to the wrong book.
 
-## The slope, not the level
+## What it scores
 
-A live scan tells you where a title stands today. That is the wrong shape for scouting: a
-book at APS 71 that was 52 three weeks ago is a completely different call from one that has
-sat at 71 since spring. The first is moving; the second is already priced in. Level is what
-everyone can see - the slope is the edge.
+| Factor | Weight | What it measures |
+|---|---|---|
+| **Momentum** | 25 | Wikimedia pageviews: 30-day volume against the prior 60-day baseline; a doubling tops out |
+| **Readership** | 20 | Open Library want-to-read, finished and rating counts, quality-adjusted above 5 votes |
+| **Discussion** | 15 | HN Algolia mention volume, all-time and last 12 months |
+| **Adaptability** | 20 | Genre, length, high-concept markers, series and award signals |
+| **Whitespace** | 12 | Whether a Wikipedia-visible adaptation exists or is in development |
+| **Rights** | 8 | Likely availability, inferred from publication year |
 
-So a scheduled job runs the same scan twice a week and commits a dated snapshot to
-`data/history/`. The board then reads those files and adds:
-
-- a **plus/minus badge** on any title whose APS moved by a point or more, with a tooltip
-  naming the window and the factor that drove it
-- a **Movers** panel - the biggest risers and fallers, each attributed to a factor, because
-  "+9" is trivia and "+9, mostly momentum" is a lead
-- a **trend line** in the detail panel, kept visually distinct from the pageviews sparkline
-  beside it: one shows attention, the other shows the score, and a title where those two
-  diverge is exactly the title worth opening (attention climbing while the score falls
-  usually means an adaptation was just announced and whitespace collapsed)
-
-Three things about how this is built are deliberate.
-
-**The harvester imports the browser's own modules.** `tools/harvest.mjs` shims `localStorage`
-and then calls the real `gatherSignals` and `scoreBook` - no second implementation. A trend
-line computed by different code than the current score would drift, and a drifting trend
-line is worse than none.
-
-**A snapshot is refused rather than written thin.** `gatherSignals` resolves even when every
-adapter returned `null`, which is right in the browser - one dead source should only dent a
-book's confidence. On a schedule it is a trap: a network blip produces a full slate of
-well-formed zeros that the chart would faithfully render as the day the entire book market
-collapsed. So the harvester checks resolution rate, how many titles came back with *any*
-live signal, and mean confidence, and exits non-zero rather than committing a lie. A missing
-day is honest; a day of zeros is a lie the chart keeps telling.
-
-**History is optional everywhere.** `data/history/` does not exist until the job has run
-once, and a fork may never run it. A missing history means no badges, no Movers panel, no
-trend line - and a board that behaves exactly as it did before. Nothing on the page waits on
-it, either: the fetch runs alongside the scan rather than in front of it.
-
-Snapshots are keyed by book id, so adding or removing slate titles never shifts anyone's
-series, and each snapshot records the weights that produced it - a score is only comparable
-against the weights that made it.
+Also per title: a format read, subject-rarity comps, a movers panel, a trend line.
 
 ## Why these sources
 
-The constraint that shaped the build: a static site can only call APIs that are
-**CORS-open and keyless**. That rules a lot out, and it's worth being explicit about what
-survived:
+A static site can only call APIs that are CORS-open and keyless, which rules most of the obvious ones out — Reddit included, since it no longer permits browser-origin requests. **Open Library** survived: no key, generous, reader counts sparser than Goodreads was but real. **Wikimedia Pageviews** is the best momentum signal available without a contract: daily granularity, 92-day window, ending two days back for reporting lag. **HN Algolia** proxies one kind of chatter, not a general population — what the 15% weight says. **Google Books** is best-effort: its keyless quota is a shared anonymous pool, frequently exhausted, so nothing load-bearing depends on it.
 
-- **Open Library** — `Access-Control-Allow-Origin: *`, no key, generous. Reader counts are
-  sparser than Goodreads was, but they're real and they're free. Note that its relevance
-  ranking is not title matching: searching a novel's title will happily return an academic
-  study *about* the novel, or a foreign-language edition. Two queries (fielded and
-  free-text) are pooled and scored explicitly to pick the right work.
-- **Wikipedia + Wikimedia Pageviews** — both fully open. Pageviews is the single best
-  momentum signal available without a contract: daily granularity, 90-day history, and it
-  reflects actual public attention rather than publisher marketing.
-- **HN Algolia** — open, fast, and a decent proxy for a specific kind of cultural chatter.
-  It is *not* a general-population signal, and the score treats it accordingly (15%).
-- **Google Books** — included as best-effort enrichment only. Its keyless quota is a
-  *shared anonymous pool* that is frequently exhausted, so it returns 429 for everyone at
-  unpredictable times. Nothing load-bearing depends on it; when it fails the UI says so.
+## Run it
 
-Reddit was evaluated and dropped — it no longer permits browser-origin requests.
+No build step; GitHub Pages serves it as-is (`.nojekyll` included). Signals cache in `localStorage` for 6 hours, scanned 4 at a time on a 12s fetch timeout.
+
+```bash
+python3 -m http.server 4788                  # then open localhost:4788
+node tools/harvest.mjs                       # snapshot -> data/history/ (Node 18+, no deps)
+node tools/harvest.mjs --limit 8 --keep 30   # subset while iterating; shorter window
+```
+
+Edit [`data/slate.json`](data/slate.json) for the default slate, or add titles from the UI. Coverage text is templated and labelled as such; an Anthropic key in Settings swaps in a live `claude-opus-5` call from the browser — local use only, since a browser-side key is visible to anyone at that browser.
 
 ## Known limits
 
-Worth stating plainly, since a scouting tool that overstates its confidence is worse than
-no tool:
+- **Reader counts are thin for new releases.** A 2024 title may show 40 want-to-reads against a six-figure audience, so recent books are underscored on Readership.
+- **Adaptation detection is graded, not binary.** Two independent checks — a sibling Wikipedia article, and the article's own adaptation sections. Both agreeing reads `adapted`, one alone `likely adapted`, since a common title matches unrelated films, and `lane clear` means *no evidence found*.
+- **Rights inference is a publication-year heuristic** (96+ years reads as likely US public domain) — a prompt to check, not an answer.
+- **A book with no Wikipedia article scores 0 on Momentum** — a real penalty against under-covered and non-Anglophone work. A fresh fork also shows no movement until the job has run a few times.
 
-- **Open Library reader counts are thin for new releases.** A 2024 title may show 40
-  want-to-reads where the real audience is six figures. Momentum (Wikipedia) partly
-  compensates, but recent books are systematically underscored on the Readership axis.
-- **Adaptation detection uses two independent checks and is graded, not binary.** It looks
-  for a sibling Wikipedia article (`Annihilation (film)`, `Kindred (TV series)`) *and* scans
-  the article's own adaptation sections. Both agreeing — or the sibling article naming this
-  book's author — reads as `adapted`. One signal alone reads as `likely adapted` and should
-  be verified, because a common title (*The Deep*) will match an unrelated same-named film.
-  `lane clear` means *no evidence found*, not *verified clear*, and a book with no Wikipedia
-  article is marked unverified rather than clear.
-- **Rights inference is a publication-year heuristic**, not a rights database. It is a
-  prompt to check, not an answer.
-- **Books without a Wikipedia article score 0 on Momentum**, which is a real penalty against
-  under-covered and non-Anglophone work. The per-factor confidence readout exists so you can
-  see when this is happening — titles below 55% confidence are flagged `thin data`.
-- **A trend needs snapshots to exist.** The history starts the first time the scheduled job
-  runs, so a fresh fork shows no movement for its first couple of weeks. The window is
-  capped at 120 snapshots to keep the repo cloneable, and the UI reads the most recent 12.
-- **Deltas are only comparable within one weights regime.** Each snapshot stores the weights
-  it used; if you change `WEIGHTS_DEFAULT`, older snapshots are measuring a different thing
-  and movement across that boundary is an artifact of the model, not the market.
+## What I'd build next
 
-## Running it
-
-No build step. Any static server:
-
-```bash
-python3 -m http.server 4788 --directory .
-```
-
-Then open <http://localhost:4788>.
-
-Signals are cached in `localStorage` for 6 hours so you aren't re-hammering public APIs
-while you work through a slate. Clear it from Settings.
-
-### Recording history
-
-The snapshots behind the trend view come from a scheduled GitHub Action
-(`.github/workflows/harvest.yml`), 06:20 UTC on Mondays and Thursdays. Twice a week rather
-than daily because the underlying signals move on the order of weeks - a daily cadence would
-mostly commit noise.
-
-To seed the first one without waiting for the schedule, run the workflow from the Actions
-tab, or locally:
-
-```bash
-node tools/harvest.mjs                # whole slate -> data/history/YYYY-MM-DD.json
-node tools/harvest.mjs --limit 8      # a quick subset while iterating
-node tools/harvest.mjs --keep 30      # keep a shorter window
-```
-
-Needs Node 18+ (for global `fetch`) and no dependencies.
-
-## Optional: AI-written coverage
-
-By default the coverage panel is **templated** — assembled deterministically from the
-fetched data, with no model involved, and labelled as such.
-
-If you paste an Anthropic API key into Settings, the panel will instead call Claude
-(`claude-opus-5`) directly from the browser to write real development coverage grounded in
-the signal data. The key is stored in your browser's `localStorage` and is sent only to
-`api.anthropic.com`.
-
-Be aware this is a bring-your-own-key convenience for a local tool: a browser-side key is
-visible to anyone with access to the browser. Don't deploy a shared instance with a key in it.
-
-## Adding your own titles
-
-Use the "Add a title" form — it scans and scores immediately, and persists to your local
-slate. To change the default slate for everyone, edit [`data/slate.json`](data/slate.json).
-
-## Deploying
-
-It's a static site, so GitHub Pages serves it as-is (`.nojekyll` is included so the
-`assets/` directory isn't mangled). Push, then enable Pages on the `main` branch, root folder.
-
-## Layout
-
-```
-index.html
-assets/css/app.css
-assets/js/
-  config.js    weights, source URLs, genre affinity tables
-  util.js      fetch/cache/concurrency helpers
-  sources.js   one adapter per public API
-  score.js     the six-factor model, format read, comps
-  pitch.js     templated coverage + optional Claude call
-  store.js     localStorage: slate, verdicts, notes, weights, key
-  app.js       state, scan orchestration, rendering
-  history.js   reads data/history, computes deltas, movers and trend paths
-data/slate.json
-data/history/            dated APS snapshots, written by the scheduled harvest
-tools/harvest.mjs        the harvester - reuses sources.js and score.js
-.github/workflows/harvest.yml
-```
+- **Backtest the headline claim.** "Slope beats level" is asserted here, not tested: hold out snapshots and measure whether the top decile by three-week slope precedes announced options more often than the top decile by level.
+- **Fit the weights rather than assert them.** The 25/20/15/20/12/8 split is judgment; measure rank correlation against announced deals, fitted versus hand-set.
+- **Per-source ablation.** Drop each adapter and measure how far the top-20 ordering moves. A factor that never changes the ranking is dead weight, and holding 8% of a score is not a defense.
 
 ## License
 
-MIT.
+MIT
