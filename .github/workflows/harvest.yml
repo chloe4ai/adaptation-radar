@@ -8,7 +8,7 @@ on:
     # 06:20 UTC on Mondays and Thursdays. Twice a week, because the underlying
     # signals (Wikimedia pageviews, Open Library reader counts) move on the order
     # of weeks -- daily snapshots would mostly commit noise.
-    - cron: '20 6 * * 1,4'
+    - cron: '20 6 * * *'
   workflow_dispatch:
     inputs:
       limit:

@@ -11,7 +11,7 @@ A scoring problem: fuse six noisy, partly-missing public signals into one 0–10
 ## The product argument
 
 **1. The score is the level; the edge is the slope.**
-A book at 71 that was 52 three weeks ago is a different call from one that has sat at 71 since spring. So a scheduled job (`harvest.yml`, 06:20 UTC Mondays and Thursdays) commits a dated snapshot to `data/history/` and the board reads the last 12 — twice weekly, not daily, because these signals move on the order of weeks. Deltas are always attributed: a factor is named as driver only when it supplied 3+ points of the change, because "+9" is trivia and "+9, mostly momentum" is a lead.
+A book at 71 that was 52 three weeks ago is a different call from one that has sat at 71 since spring. So a scheduled job (`harvest.yml`, 06:20 UTC daily) commits a dated snapshot to `data/history/` and the board reads the last 12. Deltas are always attributed: a factor is named as driver only when it supplied 3+ points of the change, because "+9" is trivia and "+9, mostly momentum" is a lead.
 
 **2. The harvester imports the browser's own modules.**
 `tools/harvest.mjs` shims `localStorage` and calls the real `gatherSignals` and `scoreBook`. A trend line computed by different code than the current score drifts, and a drifting trend line is worse than none.
