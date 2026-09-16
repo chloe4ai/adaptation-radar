@@ -44,8 +44,8 @@ jobs:
             echo "no change to commit"
             exit 0
           fi
-          git config user.name  "adaptation-radar[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name  "Chloe Tan"
+          git config user.email "chloetan.cornell@gmail.com"
           git add data/history
           git commit -m "data: APS snapshot $(date -u +%Y-%m-%d)"
           # Another run may have landed while this one was scanning; rebase rather
