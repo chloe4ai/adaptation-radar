@@ -5,9 +5,9 @@ name: Harvest APS snapshot
 # board can also tell you which way a title is moving.
 on:
   schedule:
-    # 06:20 UTC on Mondays and Thursdays. Twice a week, because the underlying
-    # signals (Wikimedia pageviews, Open Library reader counts) move on the order
-    # of weeks -- daily snapshots would mostly commit noise.
+    # 06:20 UTC daily. The underlying signals (Wikimedia pageviews, Open Library
+    # reader counts) move on the order of weeks, so day-to-day deltas are small;
+    # the harvester's quality gates still refuse a thin snapshot rather than commit it.
     - cron: '20 6 * * *'
   workflow_dispatch:
     inputs:
