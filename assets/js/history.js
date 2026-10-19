@@ -9,10 +9,25 @@
  * "no trend shown" and the board behaves exactly as it did before.
  */
 
+import { WEIGHTS_DEFAULT } from './config.js';
+
 const DIR = 'data/history';
 
 /** How many snapshots to pull. Enough for a trend, few enough to stay cheap. */
-const WINDOW = 12;
+export const WINDOW = 12;
+
+/**
+ * A delta is not shown until the window spans this many days. Two snapshots a
+ * day apart measure the sources' jitter, not the title's movement; at the
+ * daily cadence of the harvest a week is the shortest span worth reporting.
+ */
+export const MIN_DAYS = 7;
+
+/** How many snapshots at each end of the window are pooled into a median. */
+export const END_POINTS = 3;
+
+/** A factor is named as driver only when its weighted share of the change is this many points. */
+export const DRIVER_MIN = 3;
 
 let loaded = null;   // Promise, so concurrent callers share one fetch round
 
@@ -25,11 +40,48 @@ async function fetchJSON(url) {
   }
 }
 
+/** Two weight tables are the same regime when every key carries the same weight. */
+export function sameWeights(a, b) {
+  if (!a || !b) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Number(a[k]) === Number(b[k]));
+}
+
 /**
- * Snapshots are keyed by book id, so a slate that gains or loses titles does not
- * shift anyone's series. A title absent from an older snapshot simply has a
- * shorter history rather than inheriting its neighbour's.
+ * Turn a set of snapshots into per-title series. Exported so the delta maths
+ * can be tested on synthetic snapshots without a fetch.
+ *
+ * Two kinds of snapshot are left out before anything is compared:
+ *   - ones with no `sources` block, written before the harvester gated on
+ *     per-source failures. On a rate-limited day those recorded momentum 0 and
+ *     "lane clear" across the slate, and nothing in the file says so.
+ *   - ones scored under different weights from the newest snapshot. A score is
+ *     only comparable against the weights that made it; a delta across a
+ *     weights change would report the edit, not the title.
+ *
+ * Snapshots are keyed by book id, so a slate that gains or loses titles does
+ * not shift anyone's series. A title absent from an older snapshot simply has
+ * a shorter history rather than inheriting its neighbour's.
  */
+export function fromSnapshots(snapshots, updatedAt = null) {
+  const sorted = (snapshots || [])
+    .filter((s) => s && Array.isArray(s.books) && s.sources)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));   // oldest-first for plotting
+  if (!sorted.length) return null;
+  const latest = sorted[sorted.length - 1];
+  const weights = latest.weights || WEIGHTS_DEFAULT;
+  const snaps = sorted.filter((s) => sameWeights(s.weights || WEIGHTS_DEFAULT, weights));
+
+  const series = new Map();   // id -> [{date, aps, factors}]
+  for (const s of snaps) {
+    for (const b of s.books) {
+      if (!series.has(b.id)) series.set(b.id, []);
+      series.get(b.id).push({ date: s.date, aps: b.aps, factors: b.factors || {} });
+    }
+  }
+  return { snaps, series, latest, weights, updatedAt, skipped: sorted.length - snaps.length };
+}
+
 export function loadHistory() {
   if (loaded) return loaded;
   loaded = (async () => {
@@ -38,46 +90,71 @@ export function loadHistory() {
     if (!Array.isArray(names) || !names.length) return null;
 
     const wanted = names.slice(0, WINDOW);              // index.json is newest-first
-    const snaps = (await Promise.all(wanted.map((n) => fetchJSON(`${DIR}/${n}`))))
-      .filter(Boolean)
-      .sort((a, b) => String(a.date).localeCompare(String(b.date)));   // oldest-first for plotting
-    if (!snaps.length) return null;
-
-    const series = new Map();   // id -> [{date, aps, factors}]
-    for (const s of snaps) {
-      for (const b of s.books || []) {
-        if (!series.has(b.id)) series.set(b.id, []);
-        series.get(b.id).push({ date: s.date, aps: b.aps, factors: b.factors || {} });
-      }
-    }
-    return { snaps, series, latest: snaps[snaps.length - 1], updatedAt: index.updatedAt };
+    const snaps = await Promise.all(wanted.map((n) => fetchJSON(`${DIR}/${n}`)));
+    return fromSnapshots(snaps, index.updatedAt);
   })();
   return loaded;
 }
+
+export function median(values) {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = v.length >> 1;
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+const round1 = (n) => Math.round(n * 10) / 10;
 
 /**
  * The change over the window, plus which factor supplied most of it. A number
  * on its own ("+9") is a curiosity; a number with a cause ("+9, mostly
  * momentum") is something to act on.
+ *
+ * The change is the median of the last few snapshots minus the median of the
+ * first few (three at each end once the window holds six; fewer, never
+ * overlapping, when it holds less). Last-minus-first would hand the whole delta
+ * to whichever two days happened to sit at the ends, and one rate-limited
+ * morning at either end is enough to invent a mover.
+ *
+ * The driver is the factor whose *weighted* contribution to that change is
+ * largest: Δfactor × weight / Σweights, in APS points. The raw factor change
+ * would name Rights (8%) over Momentum (25%) whenever its 0–100 score swung
+ * further, even when it moved the score less.
  */
 export function delta(hist, id) {
   const s = hist?.series?.get(id);
   if (!s || s.length < 2) return null;
   const first = s[0], last = s[s.length - 1];
-  const change = Math.round((last.aps - first.aps) * 10) / 10;
+  const days = dayGap(first.date, last.date);
+  if (days === null || days < MIN_DAYS) return null;
 
-  let driver = null, best = 0;
-  for (const k of Object.keys(last.factors || {})) {
-    const d = (last.factors[k] ?? 0) - (first.factors?.[k] ?? 0);
-    if (Math.abs(d) > Math.abs(best)) { best = d; driver = k; }
+  const k = Math.min(END_POINTS, Math.floor(s.length / 2));
+  const head = s.slice(0, k), tail = s.slice(-k);
+  const from = median(head.map((p) => p.aps));
+  const to = median(tail.map((p) => p.aps));
+  if (from === null || to === null) return null;
+
+  const weights = hist.weights || WEIGHTS_DEFAULT;
+  const total = Object.values(weights).reduce((t, w) => t + Number(w || 0), 0) || 1;
+  let driver = null, best = 0, bestRaw = 0;
+  for (const key of Object.keys(weights)) {
+    const w = Number(weights[key] || 0);
+    if (!w) continue;
+    const a = median(head.map((p) => p.factors?.[key]));
+    const b = median(tail.map((p) => p.factors?.[key]));
+    if (a === null || b === null) continue;     // factor missing from a snapshot: unknown, not zero
+    const contribution = ((b - a) * w) / total;
+    if (Math.abs(contribution) > Math.abs(best)) { best = contribution; bestRaw = b - a; driver = key; }
   }
   return {
-    change,
-    from: first.aps, to: last.aps,
+    change: round1(to - from),
+    from: round1(from), to: round1(to),
     span: s.length,
-    days: dayGap(first.date, last.date),
-    driver: Math.abs(best) >= 3 ? driver : null,
-    driverChange: Math.round(best * 10) / 10,
+    ends: k,
+    days,
+    driver: Math.abs(best) >= DRIVER_MIN ? driver : null,
+    driverChange: round1(best),         // in APS points
+    driverFactorChange: round1(bestRaw), // on the factor's own 0–100 scale
     points: s.map((p) => p.aps),
   };
 }

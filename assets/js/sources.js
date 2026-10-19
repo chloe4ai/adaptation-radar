@@ -18,6 +18,22 @@ const SOURCE_KEYS = ['wiki', 'pv', 'ol', 'hn', 'gb', 'adapt'];
 /** Per-source request outcomes since the last reset: `{ wiki: { ok, fail }, ... }`. */
 export const stats = {};
 
+/**
+ * Runtime switches. In the browser Google Books runs keyless and best-effort:
+ * the shared anonymous quota is often exhausted, and a miss only costs a
+ * description. The harvester runs from a shared CI address where that quota is
+ * exhausted every day, so it turns the adapter off unless a key is configured
+ * (`GOOGLE_BOOKS_KEY`, see tools/harvest.mjs): a source that is not asked
+ * records no failures, and a book without it scores the same as one whose
+ * lookup found nothing — missing, never zero.
+ */
+export const sourceOptions = { googleBooks: true, googleBooksKey: null };
+
+export function configureSources(opts = {}) {
+  Object.assign(sourceOptions, opts);
+  return { ...sourceOptions };
+}
+
 export function resetStats() {
   for (const k of SOURCE_KEYS) stats[k] = { ok: 0, fail: 0 };
   return stats;
@@ -443,11 +459,13 @@ export function hackerNews({ title }, ctx) {
    so this is never load-bearing — it only ever adds a description/categories. */
 
 export function googleBooks({ title, author }, ctx) {
-  const key = `gb:${slug(title)}:${slug(author || '')}`;
+  if (!sourceOptions.googleBooks) return Promise.resolve(null);
+  const cacheKey = `gb:${slug(title)}:${slug(author || '')}`;
   const get = fetcher('gb', ctx);
-  return cached(key, get, async () => {
+  return cached(cacheKey, get, async () => {
     const q = `intitle:${title}` + (author ? `+inauthor:${author}` : '');
-    const { data } = await get(`${SOURCES.googleBooks}?q=${encodeURIComponent(q)}&maxResults=3`, { timeout: 6000 });
+    const apiKey = sourceOptions.googleBooksKey ? `&key=${encodeURIComponent(sourceOptions.googleBooksKey)}` : '';
+    const { data } = await get(`${SOURCES.googleBooks}?q=${encodeURIComponent(q)}&maxResults=3${apiKey}`, { timeout: 6000 });
     const v = data?.items?.[0]?.volumeInfo;
     if (!v) return null;
     return {

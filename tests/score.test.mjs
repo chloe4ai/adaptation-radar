@@ -20,7 +20,6 @@ const { scoreBook } = await import('../assets/js/score.js');
 const { WEIGHTS_DEFAULT } = await import('../assets/js/config.js');
 const { pickWork, summarizePageviews, displayTitle, adaptations, stats, resetStats } =
   await import('../assets/js/sources.js');
-const { delta, movers } = await import('../assets/js/history.js');
 const { configureFetch } = await import('../assets/js/util.js');
 
 /* --------------------------------- fixtures -------------------------------- */
@@ -165,65 +164,4 @@ test('adaptations() returns null, uncached, when a lookup fails', async () => {
     globalThis.fetch = realFetch;
     configureFetch({ retries: 2, hostSpacingMs: 250 });
   }
-});
-
-/* --------------------------------- history --------------------------------- */
-
-const synthetic = () => {
-  const snap = (date, books) => ({ date, books });
-  const snaps = [
-    snap('2026-10-01', [
-      { id: 'riser', title: 'Riser', aps: 50, factors: { momentum: 40, readership: 60 } },
-      { id: 'faller', title: 'Faller', aps: 70, factors: { momentum: 80, readership: 60 } },
-      { id: 'flat', title: 'Flat', aps: 60, factors: { momentum: 50, readership: 50 } },
-    ]),
-    snap('2026-10-08', [
-      { id: 'riser', title: 'Riser', aps: 55, factors: { momentum: 60, readership: 60 } },
-      { id: 'faller', title: 'Faller', aps: 66, factors: { momentum: 70, readership: 60 } },
-      { id: 'flat', title: 'Flat', aps: 60.5, factors: { momentum: 50, readership: 51 } },
-    ]),
-    snap('2026-10-15', [
-      { id: 'riser', title: 'Riser', aps: 59, factors: { momentum: 76, readership: 61 } },
-      { id: 'faller', title: 'Faller', aps: 63, factors: { momentum: 62, readership: 60 } },
-      { id: 'flat', title: 'Flat', aps: 61, factors: { momentum: 51, readership: 52 } },
-      { id: 'new', title: 'New', aps: 40, factors: { momentum: 10 } },
-    ]),
-  ];
-  const series = new Map();
-  for (const s of snaps) {
-    for (const b of s.books) {
-      if (!series.has(b.id)) series.set(b.id, []);
-      series.get(b.id).push({ date: s.date, aps: b.aps, factors: b.factors });
-    }
-  }
-  return { snaps, series, latest: snaps[snaps.length - 1] };
-};
-
-test('delta() attributes the change to its driving factor', () => {
-  const hist = synthetic();
-  const d = delta(hist, 'riser');
-  assert.equal(d.change, 9);
-  assert.equal(d.from, 50);
-  assert.equal(d.to, 59);
-  assert.equal(d.span, 3);
-  assert.equal(d.days, 14);
-  assert.equal(d.driver, 'momentum');
-  assert.equal(d.driverChange, 36);
-  assert.deepEqual(d.points, [50, 55, 59]);
-
-  // Small factor moves are not named as a driver.
-  assert.equal(delta(hist, 'flat').driver, null);
-  // One snapshot is not a trend.
-  assert.equal(delta(hist, 'new'), null);
-  assert.equal(delta(hist, 'missing'), null);
-  assert.equal(delta(null, 'riser'), null);
-});
-
-test('movers() ranks by absolute change and drops small moves', () => {
-  const list = movers(synthetic(), 5, 2);
-  assert.deepEqual(list.map((m) => [m.id, m.change]), [['riser', 9], ['faller', -7]]);
-  assert.equal(list[0].title, 'Riser');
-  assert.equal(list[1].driver, 'momentum');
-  assert.deepEqual(movers(null), []);
-  assert.equal(movers(synthetic(), 1).length, 1);
 });

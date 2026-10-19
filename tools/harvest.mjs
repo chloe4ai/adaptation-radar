@@ -49,7 +49,7 @@ globalThis.localStorage = (() => {
   };
 })();
 
-const { gatherSignals, displayTitle, stats, resetStats } = await import('../assets/js/sources.js');
+const { gatherSignals, displayTitle, stats, resetStats, configureSources } = await import('../assets/js/sources.js');
 const { scoreBook, recommendFormat } = await import('../assets/js/score.js');
 const { WEIGHTS_DEFAULT, SCAN_CONCURRENCY, USER_AGENT } = await import('../assets/js/config.js');
 const { pool, slug, round, configureFetch } = await import('../assets/js/util.js');
@@ -68,6 +68,18 @@ globalThis.fetch = (input, init = {}) => {
 // Nobody is watching a scheduled run, so honour long Retry-After waits rather
 // than giving up after the browser's 4 s cap and recording a failure.
 configureFetch({ retries: 3, maxRetryAfterMs: 60000 });
+
+/**
+ * Google Books is keyless in the browser, but from a shared CI address its
+ * anonymous quota is exhausted every single day: 48 requests, 48 failures,
+ * nothing learned. Without a key the adapter is switched off, so the snapshot
+ * records it as disabled rather than as a 100% failure rate, and every book
+ * scores exactly as it would when the lookup found nothing. With a key
+ * (repository secret `GOOGLE_BOOKS_KEY`, passed through by harvest.yml) the
+ * source runs and is gated like Wikipedia and pageviews below.
+ */
+const GOOGLE_BOOKS_KEY = process.env.GOOGLE_BOOKS_KEY || '';
+configureSources({ googleBooks: Boolean(GOOGLE_BOOKS_KEY), googleBooksKey: GOOGLE_BOOKS_KEY || null });
 
 /* ------------------------------- arguments -------------------------------- */
 
@@ -92,6 +104,7 @@ const slate = JSON.parse(await readFile(path.join(ROOT, 'data/slate.json'), 'utf
 const seeds = LIMIT ? slate.slice(0, LIMIT) : slate;
 
 console.log(`harvesting ${seeds.length} titles at concurrency ${SCAN_CONCURRENCY}`);
+if (!GOOGLE_BOOKS_KEY) console.log('google books: disabled (no GOOGLE_BOOKS_KEY); readership and adaptability use Open Library and Wikipedia only');
 if (PARTIAL) console.log(`partial run, not written to data/history (output: ${OUT})`);
 const started = Date.now();
 resetStats();
@@ -135,14 +148,17 @@ for (const signals of results) {
 
 const failRate = (s) => (s.ok + s.fail ? s.fail / (s.ok + s.fail) : 0);
 const sources = Object.fromEntries(Object.entries(stats).map(([k, v]) => [k, { ok: v.ok, fail: v.fail }]));
+// Not asked is not the same as failed: a consumer reading this snapshot should
+// see that the source was off, not that it was down.
+if (!GOOGLE_BOOKS_KEY) sources.gb = { ok: 0, fail: 0, disabled: true };
 
 console.log('source requests (ok / fail / fail rate):');
 for (const [k, v] of Object.entries(sources)) {
-  console.log(`  ${k.padEnd(6)} ${String(v.ok).padStart(4)} / ${String(v.fail).padStart(4)} / ${(failRate(v) * 100).toFixed(1)}%`);
+  console.log(`  ${k.padEnd(6)} ${String(v.ok).padStart(4)} / ${String(v.fail).padStart(4)} / ${(failRate(v) * 100).toFixed(1)}%${v.disabled ? ' (disabled)' : ''}`);
 }
 if (process.env.GITHUB_STEP_SUMMARY) {
   const rows = Object.entries(sources)
-    .map(([k, v]) => `| ${k} | ${v.ok} | ${v.fail} | ${(failRate(v) * 100).toFixed(1)}% |`)
+    .map(([k, v]) => `| ${k} | ${v.ok} | ${v.fail} | ${v.disabled ? 'disabled' : `${(failRate(v) * 100).toFixed(1)}%`} |`)
     .join('\n');
   await appendFile(
     process.env.GITHUB_STEP_SUMMARY,
@@ -174,9 +190,12 @@ if (meanConfidence < 0.35) {
 // Momentum and whitespace both hang off Wikipedia. When it rate-limits, every
 // title still "resolves" through Open Library and HN, so the gates above pass
 // — and the snapshot records momentum 0 and "lane clear" across the board.
-// The per-source failure rate is the only gate that sees that outage.
+// The per-source failure rate is the only gate that sees that outage. Google
+// Books joins the gate only when it is actually running (keyed): a disabled
+// source has nothing to fail.
 const MAX_FAIL_RATE = 0.15;
-const throttled = ['wiki', 'pv'].filter((k) => failRate(sources[k]) > MAX_FAIL_RATE);
+const gated = ['wiki', 'pv', ...(GOOGLE_BOOKS_KEY ? ['gb'] : [])];
+const throttled = gated.filter((k) => failRate(sources[k]) > MAX_FAIL_RATE);
 if (throttled.length) {
   console.error(throttled.map((k) =>
     `${k}: ${sources[k].fail}/${sources[k].ok + sources[k].fail} requests failed (${(failRate(sources[k]) * 100).toFixed(1)}%)`

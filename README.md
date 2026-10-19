@@ -13,13 +13,15 @@ A scoring problem: fuse six noisy, partly-missing public signals into one 0–10
 ## The product argument
 
 **1. The score is the level; the edge is the slope.**
-A book at 71 that was 52 three weeks ago is a different call from one that has sat at 71 since spring. So a scheduled job (`harvest.yml`, 06:20 UTC daily) commits a dated snapshot to `data/history/` and the board reads the last 12. Deltas are always attributed: a factor is named as driver only when it supplied 3+ points of the change, because "+9" is trivia and "+9, mostly momentum" is a lead.
+A book at 71 that was 52 three weeks ago is a different call from one that has sat at 71 since spring. So a scheduled job (`harvest.yml`, 06:20 UTC daily) commits a dated snapshot to `data/history/` and the board reads the last 12. The delta is the median of the last three snapshots minus the median of the first three (fewer at each end while the window is short, never overlapping), so one odd morning cannot invent a mover, and nothing is shown until the window spans at least seven days — two snapshots a day apart measure the sources' jitter, not the title. Deltas are always attributed: the driver is the factor with the largest *weighted* contribution (Δfactor × weight ÷ Σweights), named only when it supplied 3+ points, because "+9" is trivia and "+9, mostly momentum" is a lead. Raw factor change would name Rights at 8% over Momentum at 25% whenever its score swung further. And a score is only comparable against the weights that made it, so snapshots scored under different weights than the newest are left out of the window.
 
 **2. The harvester imports the browser's own modules.**
 `tools/harvest.mjs` shims `localStorage` and calls the real `gatherSignals` and `scoreBook`. A trend line computed by different code than the current score drifts, and a drifting trend line is worse than none.
 
 **3. A snapshot is refused rather than written thin.**
 `gatherSignals` resolves even when every adapter returned `null`, which is right in the browser: one dead source should only dent a book's confidence. On a schedule it is a trap: a blip yields a slate of well-formed zeros the chart renders as the day the book market collapsed. So the harvester exits non-zero under four checks — 60% of the slate resolved, 60% of those carrying a live signal, mean confidence 0.35, and no more than 15% of Wikipedia or pageviews requests failing (a rate-limited Wikipedia otherwise passes the first three while zeroing momentum and marking every lane clear). Each snapshot records per-source ok/fail counts. A missing day is honest; a day of zeros is a lie the chart keeps telling.
+
+Google Books gets the same treatment in reverse. Its keyless quota is a shared anonymous pool that is exhausted from CI every single day — 48 requests, 48 failures — so without a key the harvester does not ask at all: the snapshot records the source as `disabled`, and every book scores as if the lookup had found nothing. Missing lowers confidence; it is never written down as zero. Set a `GOOGLE_BOOKS_KEY` repository secret (an API key from Google Cloud with the Books API enabled) and the source runs, is counted, and is gated at the same 15% failure rate as Wikipedia.
 
 **4. Missing data lowers confidence. It is never imputed.**
 Every factor returns a 0–1 confidence beside its score and composite confidence is their weighted average, so a book scored off two working sources reads as thin — flagged below 55% — not authoritative. Weights are sliders, and each snapshot stores the weights that made it: a delta is only comparable inside one weights regime.
@@ -42,7 +44,7 @@ Also per title: a format read, subject-rarity comps, a movers panel, a trend lin
 
 ## Why these sources
 
-A static site can only call APIs that are CORS-open and keyless, which rules most of the obvious ones out — Reddit included, since it no longer permits browser-origin requests. **Open Library** survived: no key, generous, reader counts sparser than Goodreads was but real. **Wikimedia Pageviews** is the best momentum signal available without a contract: daily granularity, 92-day window, ending two days back for reporting lag. **HN Algolia** proxies one kind of chatter, not a general population — what the 15% weight says. **Google Books** is best-effort: its keyless quota is a shared anonymous pool, frequently exhausted, so nothing load-bearing depends on it.
+A static site can only call APIs that are CORS-open and keyless, which rules most of the obvious ones out — Reddit included, since it no longer permits browser-origin requests. **Open Library** survived: no key, generous, reader counts sparser than Goodreads was but real. **Wikimedia Pageviews** is the best momentum signal available without a contract: daily granularity, 92-day window, ending two days back for reporting lag. **HN Algolia** proxies one kind of chatter, not a general population — what the 15% weight says. **Google Books** is best-effort: its keyless quota is a shared anonymous pool, frequently exhausted, so nothing load-bearing depends on it. The browser tries it keyless; the scheduled harvest skips it unless `GOOGLE_BOOKS_KEY` is set.
 
 ## Run it
 
@@ -52,8 +54,14 @@ No build step; GitHub Pages serves it as-is (`.nojekyll` included). Signals cach
 python3 -m http.server 4788                       # then open localhost:4788
 node tools/harvest.mjs                            # snapshot -> data/history/ (Node 18+, no deps)
 node tools/harvest.mjs --limit 8 --out /tmp/aps   # subset while iterating; keeps data/history untouched
+GOOGLE_BOOKS_KEY=... node tools/harvest.mjs       # with a key, Google Books runs and is gated too
+node tools/clean-history.mjs --dry-run            # list snapshots the history cleanup would exclude
 node --test tests/*.test.mjs                      # scoring, source-matching and history tests (no deps)
 ```
+
+### History restarts on 2026-10-19
+
+Snapshots before 2026-10-19 were written by a harvester that did not identify itself to Wikimedia and had no per-source gate. On the days it was rate-limited every title still resolved through Open Library and HN, so the file passed the thin-snapshot checks with momentum 0 and "lane clear" across the slate — and nothing in the file says so. Those days are indistinguishable from real readings by shape, so the trend they feed is noise. [`tools/clean-history.mjs`](tools/clean-history.mjs) finds them by symptom (no `sources` block *and* momentum 0 for more than half the titles) and moves them into [`data/history/excluded/`](data/history/excluded/), where neither the index nor the board reads them. All 39 snapshots from 2026-08-29 to 2026-10-18 matched; the trend line restarts from the first gated snapshot, 2026-10-19, and deltas appear once the window spans seven days. The excluded files stay in the repository, and in git history, so the call can be audited or reversed by moving a file back up a level and rerunning the script.
 
 Edit [`data/slate.json`](data/slate.json) for the default slate, or add titles from the UI. Coverage text is templated and labelled as such; an Anthropic key in Settings swaps in a live `claude-opus-5` call from the browser — local use only, since a browser-side key is visible to anyone at that browser.
 
@@ -62,7 +70,7 @@ Edit [`data/slate.json`](data/slate.json) for the default slate, or add titles f
 - **Reader counts are thin for new releases.** A 2024 title may show 40 want-to-reads against a six-figure audience, so recent books are underscored on Readership.
 - **Adaptation detection is graded, not binary.** Two independent checks — a sibling Wikipedia article, and the article's own adaptation sections. Both agreeing reads `adapted`, one alone `likely adapted`, since a common title matches unrelated films, and `lane clear` means *no evidence found*.
 - **Rights inference is a publication-year heuristic** (96+ years reads as likely US public domain) — a prompt to check, not an answer.
-- **A book with no Wikipedia article scores 0 on Momentum** — a real penalty against under-covered and non-Anglophone work. A fresh fork also shows no movement until the job has run a few times.
+- **A book with no Wikipedia article scores 0 on Momentum** — a real penalty against under-covered and non-Anglophone work. A fresh fork also shows no movement until the job has run for a week.
 
 ## What I'd build next
 

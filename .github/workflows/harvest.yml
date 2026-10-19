@@ -40,6 +40,9 @@ jobs:
         # writes to a scratch directory and the commit step finds nothing.
         env:
           LIMIT: ${{ github.event.inputs.limit || '0' }}
+          # Optional. Without it the harvester skips Google Books (the keyless
+          # quota is always exhausted from CI) and records the source as disabled.
+          GOOGLE_BOOKS_KEY: ${{ secrets.GOOGLE_BOOKS_KEY }}
         run: node tools/harvest.mjs --limit "$LIMIT"
 
       - name: Commit snapshot

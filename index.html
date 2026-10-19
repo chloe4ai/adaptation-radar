@@ -48,7 +48,7 @@
 
     <section id="movers-panel" hidden>
       <h2>Movers</h2>
-      <p class="dim tiny">Change in APS across the recorded snapshots &mdash; the slope,
+      <p class="dim tiny">Change in APS across the last 12 snapshots &mdash; the slope,
       not the level.</p>
       <ul id="movers" class="movers"></ul>
       <p class="dim tiny" id="movers-foot"></p>
@@ -61,8 +61,11 @@
       <p><em>Thin data</em> means fewer than half the sources returned usable signal.
       Treat those scores as a prompt to look manually, not as a verdict.</p>
       <p>A <strong>&plus;/&minus; badge</strong> appears once the scheduled harvest has
-      recorded more than one snapshot. It is the change in APS since the oldest one
-      held, which is the number a live-only board cannot give you.</p>
+      recorded snapshots at least seven days apart. It reads the last 12 snapshots and
+      takes the median of the last three minus the median of the first three, so one
+      odd day cannot invent a mover. A factor is named as the driver only when its
+      weighted share of that change is 3&plus; points, and snapshots scored under
+      different weights are left out.</p>
     </section>
   </aside>
 

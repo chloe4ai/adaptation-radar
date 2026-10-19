@@ -263,9 +263,12 @@ function renderMovers() {
   $('#movers').querySelectorAll('li').forEach((el) => {
     el.addEventListener('click', () => selectBook(el.dataset.id));
   });
-  const n = state.history?.snaps?.length || 0;
+  const h = state.history;
+  const n = h?.snaps?.length || 0;
+  const first = h?.snaps?.[0]?.date, last = h?.latest?.date;
   $('#movers-foot').textContent =
-    `${n} snapshot${n === 1 ? '' : 's'}, latest ${state.history?.latest?.date || '—'}.`;
+    `${n} snapshot${n === 1 ? '' : 's'}, ${first && first !== last ? `${first} to ${last}` : `latest ${last || '—'}`}.` +
+    ` Median of the first three against the last three.`;
 }
 
 function trendSvg(id) {
@@ -276,7 +279,7 @@ function trendSvg(id) {
   const sign = d.change > 0 ? '+' : '';
   return `<div class="trend-line">
     <span class="trend"><svg viewBox="0 0 96 24" aria-hidden="true"><path d="${path}"/></svg></span>
-    <span class="dim tiny">APS ${d.from} &rarr; ${d.to} (${sign}${d.change}) across ${d.span} snapshots${d.driver ? `, driven by ${escapeHtml(d.driver)} ${d.driverChange > 0 ? '+' : ''}${d.driverChange}` : ''}</span>
+    <span class="dim tiny">APS ${d.from} &rarr; ${d.to} (${sign}${d.change}) over ${d.days}d, ${d.span} snapshots${d.driver ? `, driven by ${escapeHtml(d.driver)} ${d.driverChange > 0 ? '+' : ''}${d.driverChange} pts` : ''}</span>
   </div>`;
 }
 
