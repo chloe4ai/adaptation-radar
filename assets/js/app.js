@@ -1,6 +1,6 @@
 import { SCAN_CONCURRENCY } from './config.js';
 import { pool, escapeHtml, slug, round, clearCache } from './util.js';
-import { gatherSignals, coverUrl } from './sources.js';
+import { gatherSignals, coverUrl, displayTitle } from './sources.js';
 import { scoreBook, recommendFormat, findComps, FACTOR_LABELS, FACTOR_BLURBS } from './score.js';
 import { buildTemplatedPitch, generateAIPitch } from './pitch.js';
 import { loadHistory, delta, movers, trendPath } from './history.js';
@@ -27,14 +27,39 @@ const state = {
 async function init() {
   bindChrome();
   renderWeightControls();
+  await start();
+}
 
-  let slate = store.getSlate();
-  if (!slate) {
-    const res = await fetch('data/slate.json');
-    slate = (await res.json()).titles;
-    store.setSlate(slate);
+async function loadSlate() {
+  const saved = store.getSlate();
+  if (saved) return saved;
+  const res = await fetch('data/slate.json');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const titles = (await res.json())?.titles;
+  if (!Array.isArray(titles)) throw new Error('no titles in slate.json');
+  store.setSlate(titles);
+  return titles;
+}
+
+/** Loading can fail (offline, a bad deploy); say so instead of spinning forever. */
+function showSlateError(err) {
+  $('#status').classList.remove('is-busy');
+  $('#status').innerHTML =
+    `<span class="error">Could not load the slate (${escapeHtml(err?.message || String(err))}).</span> ` +
+    '<button class="btn btn-sm" id="slate-retry">Retry</button>';
+  $('#slate-retry').addEventListener('click', () => {
+    setStatus('Loading slate…', true);
+    start();
+  });
+}
+
+async function start() {
+  try {
+    state.slate = await loadSlate();
+  } catch (err) {
+    showSlateError(err);
+    return;
   }
-  state.slate = slate;
 
   renderEmpty();
 
@@ -87,7 +112,28 @@ async function scan(seeds = state.slate) {
     `${state.books.length} titles scored · live data from Open Library, Wikipedia, Wikimedia Pageviews and HN` +
     (dead ? ` · ${dead} title${dead > 1 ? 's' : ''} returned no data` : ''),
   );
+  showRateLimitNotice(incoming);
   render();
+}
+
+/**
+ * A title is partial when a Wikipedia-backed signal is missing *because the
+ * request failed*, not because there is no article. The failed pieces are
+ * never written to the signal cache (sources.js refuses to cache anything
+ * built from a failed request), so a re-scan fetches exactly those again
+ * while keeping what did come back.
+ */
+const WIKI_SOURCES = ['wiki', 'pv', 'adapt'];
+const isPartial = (signals) =>
+  WIKI_SOURCES.some((k) => signals[k] == null) &&
+  (signals.failed || []).some((k) => WIKI_SOURCES.includes(k));
+
+function showRateLimitNotice(books) {
+  const notice = $('#notice');
+  const partial = books.filter((b) => isPartial(b.signals)).length;
+  const show = books.length > 0 && partial / books.length > 0.25;
+  notice.hidden = !show;
+  notice.textContent = show ? 'Wikipedia is rate-limiting this browser; some scores are partial' : '';
 }
 
 function makeBook(signals) {
@@ -167,7 +213,7 @@ function rowHtml(b, rank) {
     <li class="row ${b.id === state.selectedId ? 'is-selected' : ''}" data-id="${b.id}" tabindex="0">
       <span class="rank">${rank}</span>
       <span class="row-main">
-        <span class="row-title">${escapeHtml(b.signals.ol?.title || b.seed.title)}</span>
+        <span class="row-title">${escapeHtml(displayTitle(b.signals))}</span>
         <span class="row-meta">${escapeHtml(author)}${b.signals.ol?.year ? ` · ${b.signals.ol.year}` : ''} · ${escapeHtml(b.format.format)}</span>
       </span>
       <span class="row-flags">
@@ -262,7 +308,7 @@ function renderDetail(b) {
     <header class="detail-head">
       ${cover ? `<img class="cover" src="${cover}" alt="" loading="lazy">` : '<div class="cover cover-blank"></div>'}
       <div>
-        <h2>${escapeHtml(ol?.title || b.seed.title)}</h2>
+        <h2>${escapeHtml(displayTitle(b.signals))}</h2>
         <p class="byline">${escapeHtml(ol?.authors?.join(', ') || b.seed.author || 'Unknown author')}${ol?.year ? ` · ${ol.year}` : ''}${ol?.pages ? ` · ${ol.pages}pp` : ''}</p>
         <p class="score-line">
           <span class="aps-big ${bandClass(b.score.aps)}">${round(b.score.aps, 1)}</span>
@@ -306,7 +352,7 @@ function renderDetail(b) {
       <h3>Comparables <span class="dim">(from this slate)</span></h3>
       ${comps.length
         ? `<ul class="comps">${comps.map((c) => `
-            <li><button data-comp="${c.book.id}">${escapeHtml(c.book.signals.ol?.title || c.book.seed.title)}</button>
+            <li><button data-comp="${c.book.id}">${escapeHtml(displayTitle(c.book.signals))}</button>
             <span class="dim">${round(c.book.score.aps, 0)} · ${escapeHtml(c.shared.slice(0, 3).join(', '))}</span></li>`).join('')}</ul>`
         : '<p class="dim">No strong subject overlap with other scanned titles.</p>'}
     </section>
@@ -479,7 +525,7 @@ function exportCsv() {
     ...Object.keys(state.weights), 'verdict', 'notes'];
   const rows = visibleBooks().map((b, i) => [
     i + 1,
-    b.signals.ol?.title || b.seed.title,
+    displayTitle(b.signals),
     b.signals.ol?.authors?.join('; ') || b.seed.author || '',
     b.signals.ol?.year || '',
     b.score.aps,

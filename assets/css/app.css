@@ -66,6 +66,8 @@ a { color: var(--mid); }
   animation: pulse 1s ease-in-out infinite;
 }
 @keyframes pulse { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+.statusbar p.notice { margin-top: 4px; color: var(--warm); }
+.statusbar .btn-sm { margin-left: 6px; padding: 2px 8px; }
 
 #progress-bar { height: 2px; background: var(--line); margin-top: 6px; }
 #progress-bar i { display: block; height: 100%; width: var(--pct, 0%); background: var(--accent); transition: width .2s; }
