@@ -99,17 +99,29 @@ test('priorAvg30 divides by the actual prior window length', () => {
 
 /* --------------------------------- pickWork -------------------------------- */
 
-test('pickWork rejects a Hangul candidate when the seed is ASCII', () => {
-  const hangul = { key: '/works/K', title: '채식주의자', author_name: ['Han Kang'], language: ['kor', 'eng'] };
-  const english = { key: '/works/E', title: 'The Vegetarian', author_name: ['Han Kang'], language: ['eng'] };
+const hangul = { key: '/works/K', title: '채식주의자', author_name: ['Han Kang'], language: ['kor', 'eng'] };
+const hangul2 = { key: '/works/H', title: '소년이 온다', author_name: ['Han Kang'], language: ['kor', 'eng'] };
 
+test('pickWork prefers an English-titled record over a Hangul one for an ASCII seed', () => {
+  const english = { key: '/works/E', title: 'The Vegetarian', author_name: ['Han Kang'], language: ['eng'] };
   assert.equal(pickWork([hangul, english], 'The Vegetarian', 'Han Kang')?.key, '/works/E');
   assert.equal(pickWork([english, hangul], 'The Vegetarian', 'Han Kang')?.key, '/works/E');
-  // On its own the Hangul record is not a match at all, rather than a +60 prefix match.
-  assert.equal(pickWork([hangul], 'The Vegetarian', 'Han Kang'), null);
-  // ...and setting it aside must not hand the slot to another book by the same author.
-  const other = { key: '/works/G', title: 'Greek Lessons', author_name: ['Han Kang'], language: ['eng'] };
-  assert.equal(pickWork([hangul, other], 'The Vegetarian', 'Han Kang'), null);
+});
+
+test('pickWork falls back to the top-ranked Hangul record when it is the only same-author match', () => {
+  assert.equal(pickWork([hangul], 'The Vegetarian', 'Han Kang')?.key, '/works/K');
+  // "Top-ranked" is Open Library's order: the search matched it on edition titles.
+  assert.equal(pickWork([hangul, hangul2], 'The Vegetarian', 'Han Kang')?.key, '/works/K');
+  // Without an author there is nothing tying a non-Latin record to this book.
+  assert.equal(pickWork([hangul], 'The Vegetarian', ''), null);
+});
+
+test('pickWork does not hand the match to a different book by the same author', () => {
+  const greek = { key: '/works/G', title: 'Greek Lessons', author_name: ['Han Kang'], language: ['eng'], cover_i: 1 };
+  const catalan = { key: '/works/C', title: 'Actes humans', author_name: ['Han Kang'], language: ['cat'] };
+  assert.equal(pickWork([hangul, greek], 'The Vegetarian', 'Han Kang')?.key, '/works/K');
+  assert.equal(pickWork([greek, hangul], 'The Vegetarian', 'Han Kang')?.key, '/works/K');
+  assert.equal(pickWork([catalan, hangul2], 'Human Acts', 'Han Kang')?.key, '/works/H');
 });
 
 test('pickWork prefers the English edition for an ASCII seed', () => {

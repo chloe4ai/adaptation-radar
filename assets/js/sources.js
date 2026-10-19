@@ -116,17 +116,6 @@ export function pickWork(docs, title, author) {
 
   let candidates = docs.filter((d) => !WRONG_ARTIFACT_RE.test(d.title || ''));
 
-  // `norm()` keeps only [a-z0-9], so a Hangul or Cyrillic title normalises to
-  // "" — and every string starts with "", which used to hand any non-Latin
-  // record the prefix-match bonus. For a Latin-script seed, such a record
-  // cannot be compared by title at all, so it is not a candidate.
-  let setAside = 0;
-  if (latinSeed) {
-    const before = candidates.length;
-    candidates = candidates.filter((d) => hasLatin(norm(d.title || '')));
-    setAside = before - candidates.length;
-  }
-
   // If we were given an author, the record must actually be by them. This is
   // what keeps a search for a novel from landing on an academic study of it,
   // or on an unrelated physics textbook that shares the title.
@@ -136,6 +125,24 @@ export function pickWork(docs, title, author) {
     candidates = byAuthor;
   }
   if (!candidates.length) return null;
+
+  // `norm()` keeps only [a-z0-9], so a Hangul or Cyrillic title normalises to
+  // "" — and every string starts with "", which used to hand any non-Latin
+  // record the prefix-match bonus. For a Latin-script seed such a record
+  // cannot be compared by title, so it is set aside and only used as a
+  // fallback (below).
+  let setAside = [];
+  if (latinSeed) {
+    setAside = candidates.filter((d) => !hasLatin(norm(d.title || '')));
+    candidates = candidates.filter((d) => hasLatin(norm(d.title || '')));
+  }
+  // Open Library files translations under the original-language work, so for
+  // a translated novel (The Vegetarian -> 채식주의자) the only record by this
+  // author that is actually this book can be the non-Latin one. Take the one
+  // Open Library ranked highest — the search matched it on edition titles —
+  // but only when the author is known to be right.
+  const fallback = () => (hasAuthor && setAside.length ? setAside[0] : null);
+  if (!candidates.length) return fallback();
 
   const scored = candidates.map((d) => {
     const got = norm(d.title || '');
@@ -175,9 +182,9 @@ export function pickWork(docs, title, author) {
   scored.sort((a, b) => b.s - a.s);
   // When original-language records were set aside above, the best remaining
   // same-author record with no title in common is far more likely to be a
-  // different book (Greek Lessons for The Vegetarian) than this one. Resolve
-  // to nothing rather than attach the score to the wrong work.
-  if (setAside && !scored[0].titled) return null;
+  // different book (Greek Lessons for The Vegetarian) than this one, so the
+  // original-language record wins.
+  if (setAside.length && !scored[0].titled) return fallback();
   return scored[0].s > 15 ? scored[0].d : null;
 }
 
