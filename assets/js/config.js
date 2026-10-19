@@ -29,6 +29,11 @@ export const SCAN_CONCURRENCY = 4;
 
 export const FETCH_TIMEOUT_MS = 12000;
 
+// Wikimedia asks API clients to identify themselves and blocks or throttles
+// anonymous traffic hard. The harvester sends this as User-Agent; the browser
+// cannot set User-Agent, so it sends it as Api-User-Agent instead.
+export const USER_AGENT = 'AdaptationRadar/1.0 (https://github.com/chloe4ai/adaptation-radar)';
+
 // Genre → adaptability affinity. Positive terms lift the structural score,
 // negative terms sink it. Matched against Open Library subject strings.
 export const GENRE_AFFINITY = [

@@ -6,16 +6,55 @@ import { getJSON, cacheGet, cacheSet, isoDaysAgo, slug } from './util.js';
  * the browser. Each one returns a plain object on success and `null` on
  * failure, so one dead source degrades a book's confidence rather than
  * killing the scan.
+ *
+ * "Failed" and "found nothing" are tracked separately, though: `stats` counts
+ * requests per source that answered (ok) or did not (fail), and each
+ * `gatherSignals` result lists the sources that failed for that book. A
+ * failure is never cached, and never turned into a confident answer.
  */
 
-async function cached(key, fn) {
+const SOURCE_KEYS = ['wiki', 'pv', 'ol', 'hn', 'gb', 'adapt'];
+
+/** Per-source request outcomes since the last reset: `{ wiki: { ok, fail }, ... }`. */
+export const stats = {};
+
+export function resetStats() {
+  for (const k of SOURCE_KEYS) stats[k] = { ok: 0, fail: 0 };
+  return stats;
+}
+resetStats();
+
+/** MediaWiki's api.php reports some failures (ratelimited, maxlag) as HTTP 200. */
+const isApiError = (data) => Boolean(data && typeof data === 'object' && !Array.isArray(data) && data.error);
+
+/**
+ * A fetch function bound to one source. It counts each request in `stats`,
+ * and remembers whether any request failed — both on itself (so `cached` can
+ * refuse to store a half-built value) and on the per-book `ctx`.
+ */
+function fetcher(source, ctx) {
+  const get = async (url, opts) => {
+    const r = await getJSON(url, opts);
+    const ok = r.ok && !isApiError(r.data);
+    stats[source][ok ? 'ok' : 'fail']++;
+    if (!ok) {
+      get.failed = true;
+      ctx?.failed?.add(source);
+    }
+    return { ok, data: ok ? r.data : null };
+  };
+  get.failed = false;
+  return get;
+}
+
+async function cached(key, get, fn) {
   const hit = cacheGet(key);
   if (hit !== null) return hit;
   const val = await fn();
-  // Never cache a null: it is indistinguishable from a cache miss on read, and
-  // persisting a transient failure would freeze a book's missing factor for
-  // the whole TTL.
-  if (val !== undefined && val !== null) cacheSet(key, val);
+  // Never cache a null: it is indistinguishable from a cache miss on read.
+  // And never cache anything built while a request failed: persisting a
+  // transient failure would freeze a book's missing factor for the whole TTL.
+  if (val !== undefined && val !== null && !get.failed) cacheSet(key, val);
   return val;
 }
 
@@ -65,12 +104,28 @@ function authorMatches(names, author) {
 // then shows the title as thin data instead of quietly mis-attributing it.
 const WRONG_ARTIFACT_RE = /\b(set of|box(?:ed)? set|collection|omnibus|complete series|bundle|\d+ books?|book (?:two|three|four|2|3|4)|vol(?:ume|\.)? ?(?:ii|iii|2|3))\b/i;
 
-function pickWork(docs, title, author) {
+const hasLatin = (s) => /[a-z]/.test(s);
+const isAscii = (s) => /^[\x20-\x7e]*$/.test(String(s));
+
+export function pickWork(docs, title, author) {
   const want = norm(title);
   const wantTokens = new Set(want.split('-').filter((t) => t.length > 2));
   const hasAuthor = Boolean((author || '').trim());
+  const latinSeed = hasLatin(want);
+  const asciiSeed = isAscii(title);
 
   let candidates = docs.filter((d) => !WRONG_ARTIFACT_RE.test(d.title || ''));
+
+  // `norm()` keeps only [a-z0-9], so a Hangul or Cyrillic title normalises to
+  // "" — and every string starts with "", which used to hand any non-Latin
+  // record the prefix-match bonus. For a Latin-script seed, such a record
+  // cannot be compared by title at all, so it is not a candidate.
+  let setAside = 0;
+  if (latinSeed) {
+    const before = candidates.length;
+    candidates = candidates.filter((d) => hasLatin(norm(d.title || '')));
+    setAside = before - candidates.length;
+  }
 
   // If we were given an author, the record must actually be by them. This is
   // what keeps a search for a novel from landing on an academic study of it,
@@ -85,9 +140,14 @@ function pickWork(docs, title, author) {
   const scored = candidates.map((d) => {
     const got = norm(d.title || '');
     let s = 0;
-    if (got === want) s += 100;
+    let titled = false;   // any title evidence at all, beyond author and language
+    if (!latinSeed) {
+      // A non-Latin seed has nothing to normalise; only an exact match counts.
+      if (fold(d.title || '').trim() === fold(title).trim()) s += 100;
+    } else if (got === want) s += 100;
     else if (got.startsWith(want) || want.startsWith(got)) s += 60;
     else if (got.includes(want)) s += 25;
+    titled = s > 0;
 
     // Token overlap, so near-misses still rank above unrelated records.
     if (wantTokens.size) {
@@ -95,19 +155,29 @@ function pickWork(docs, title, author) {
       let shared = 0;
       for (const t of wantTokens) if (gotTokens.has(t)) shared++;
       s += (shared / wantTokens.size) * 30;
+      if (shared) titled = true;
     }
 
     if (hasAuthor) s += 45; // candidates are already filtered to this author
-    // Prefer the English edition — this is a scouting tool for English-language screen rights.
-    if ((d.language || []).includes('eng')) s += 18;
+    // Prefer the English edition — this is a scouting tool for English-language
+    // screen rights. An ASCII seed is an English title, so a record with no
+    // English edition at all is probably the original-language work.
+    const langs = d.language || [];
+    if (langs.includes('eng')) s += 18;
+    else if (asciiSeed && langs.length) s -= 18;
     if (d.cover_i) s += 4;
     if (d.ratings_count || d.want_to_read_count) s += 4;
     // Studies and companions carry long titles; the work itself is usually terse.
     s -= Math.max(0, got.length - want.length) * 0.08;
-    return { d, s };
+    return { d, s, titled };
   });
 
   scored.sort((a, b) => b.s - a.s);
+  // When original-language records were set aside above, the best remaining
+  // same-author record with no title in common is far more likely to be a
+  // different book (Greek Lessons for The Vegetarian) than this one. Resolve
+  // to nothing rather than attach the score to the wrong work.
+  if (setAside && !scored[0].titled) return null;
   return scored[0].s > 15 ? scored[0].d : null;
 }
 
@@ -117,9 +187,21 @@ const OL_FIELDS = [
   'subject', 'number_of_pages_median', 'cover_i', 'first_sentence', 'language',
 ].join(',');
 
-export function openLibrary({ title, author }) {
+/**
+ * The title to show for a book. Open Library sometimes resolves to the
+ * original-language work record (채식주의자 for The Vegetarian); a title with
+ * no Latin letters is useless on an English-language board, so fall back to
+ * the seed the user typed.
+ */
+export function displayTitle(signals) {
+  const t = signals?.ol?.title;
+  return t && /[a-z]/.test(fold(t)) ? t : signals?.seed?.title || t || '';
+}
+
+export function openLibrary({ title, author }, ctx) {
   const key = `ol:${slug(title)}:${slug(author || '')}`;
-  return cached(key, async () => {
+  const get = fetcher('ol', ctx);
+  return cached(key, get, async () => {
     // Two queries, pooled. The fielded search is precise but brittle (it
     // returns nothing for some author spellings); the free-text search has
     // better recall but ranks studies and companions alongside the work.
@@ -130,9 +212,9 @@ export function openLibrary({ title, author }) {
     const freeText = `${SOURCES.openLibrary}?q=${encodeURIComponent(author ? `${title} ${author}` : title)}` +
       `&limit=10&fields=${OL_FIELDS}`;
 
-    const [a, b] = await Promise.all([getJSON(fielded), getJSON(freeText)]);
+    const [a, b] = await Promise.all([get(fielded), get(freeText)]);
     const pooled = new Map();
-    for (const d of [...(a?.docs || []), ...(b?.docs || [])]) {
+    for (const d of [...(a.data?.docs || []), ...(b.data?.docs || [])]) {
       if (d?.key && !pooled.has(d.key)) pooled.set(d.key, d);
     }
     if (!pooled.size) return null;
@@ -163,14 +245,15 @@ export const coverUrl = (coverId, size = 'M') =>
 
 /* -------- Wikipedia: cultural footprint + existing-adaptation detection ----- */
 
-export function wikipedia({ title, author }) {
+export function wikipedia({ title, author }, ctx) {
   const key = `wiki:${slug(title)}:${slug(author || '')}`;
-  return cached(key, async () => {
+  const get = fetcher('wiki', ctx);
+  return cached(key, get, async () => {
     const search = `${title} ${author || ''} novel`.trim();
     const url =
       `${SOURCES.wikiApi}?action=query&list=search&format=json&origin=*` +
       `&srlimit=5&srsearch=${encodeURIComponent(search)}`;
-    const data = await getJSON(url);
+    const { data } = await get(url);
     const hits = data?.query?.search || [];
     if (!hits.length) return null;
 
@@ -180,7 +263,7 @@ export function wikipedia({ title, author }) {
       hits.find((h) => slug(h.title).startsWith(wanted)) ||
       hits[0];
 
-    const summary = await getJSON(SOURCES.wikiSummary + encodeURIComponent(hit.title));
+    const { data: summary } = await get(SOURCES.wikiSummary + encodeURIComponent(hit.title));
     return {
       page: hit.title,
       pageKey: (summary?.titles?.canonical) || hit.title.replace(/ /g, '_'),
@@ -239,9 +322,10 @@ function adaptationSections(extract) {
   return out.join(' ').trim();
 }
 
-export function adaptations({ title, author }, wikiPage) {
+export function adaptations({ title, author }, wikiPage, ctx) {
   const key = `adapt:${slug(title)}:${slug(wikiPage || '')}`;
-  return cached(key, async () => {
+  const get = fetcher('adapt', ctx);
+  return cached(key, get, async () => {
     const siblingUrl =
       `${SOURCES.wikiApi}?action=query&list=search&format=json&origin=*&srlimit=20` +
       `&srsearch=${encodeURIComponent(`intitle:"${title}"`)}`;
@@ -250,10 +334,16 @@ export function adaptations({ title, author }, wikiPage) {
         `&titles=${encodeURIComponent(wikiPage)}`
       : null;
 
-    const [sib, ext] = await Promise.all([
-      getJSON(siblingUrl),
-      extractUrl ? getJSON(extractUrl) : Promise.resolve(null),
+    const [sibRes, extRes] = await Promise.all([
+      get(siblingUrl),
+      extractUrl ? get(extractUrl) : Promise.resolve({ ok: true, data: null }),
     ]);
+    // Half a check is not a check. With either lookup missing, "no adaptation
+    // found" would be a fact about the outage rather than the book, so the
+    // status is unknown — and, being null, it is not cached.
+    if (!sibRes.ok || !extRes.ok) return null;
+    const sib = sibRes.data;
+    const ext = extRes.data;
 
     // A common title ("The Deep") will match an unrelated "(1977 film)". The
     // search snippet is already in the response, so check it for the author's
@@ -293,38 +383,48 @@ export function adaptations({ title, author }, wikiPage) {
 
 /* ------------- Wikimedia Pageviews: the real momentum signal --------------- */
 
-export function pageviews(pageKey) {
+/**
+ * Reduce a daily view series to the momentum inputs: the last 30 days, and the
+ * days before that scaled to a 30-day average. The prior window is whatever
+ * the API returned beyond the last 30 days (about 61 days for the 92-day
+ * request, fewer for a young article), so it is divided by its actual length.
+ */
+export function summarizePageviews(views) {
+  const last30 = views.slice(-30).reduce((a, b) => a + b, 0);
+  const prior = views.slice(0, Math.max(0, views.length - 30));
+  const priorSum = prior.reduce((a, b) => a + b, 0);
+  const priorAvg30 = prior.length ? priorSum / (prior.length / 30) : 0;
+  const peak = Math.max(...views);
+  return { days: views.length, last30, priorAvg30, total: views.reduce((a, b) => a + b, 0), peak, series: views };
+}
+
+export function pageviews(pageKey, ctx) {
   if (!pageKey) return Promise.resolve(null);
   const key = `pv:${pageKey}`;
-  return cached(key, async () => {
+  const get = fetcher('pv', ctx);
+  return cached(key, get, async () => {
     // Pageviews lag ~1–2 days, so end the window a couple of days back.
     const url =
       SOURCES.pageviews + encodeURIComponent(pageKey) +
       `/daily/${isoDaysAgo(92)}/${isoDaysAgo(2)}`;
-    const data = await getJSON(url);
+    const { data } = await get(url);
     const items = data?.items;
     if (!items?.length) return null;
-
-    const views = items.map((i) => i.views);
-    const last30 = views.slice(-30).reduce((a, b) => a + b, 0);
-    const prior60 = views.slice(0, Math.max(0, views.length - 30)).reduce((a, b) => a + b, 0);
-    const priorAvg30 = prior60 / 2;
-    const peak = Math.max(...views);
-
-    return { days: views.length, last30, priorAvg30, total: views.reduce((a, b) => a + b, 0), peak, series: views };
+    return summarizePageviews(items.map((i) => i.views));
   });
 }
 
 /* ------------------- Hacker News / Algolia: discussion heat ---------------- */
 
-export function hackerNews({ title }) {
+export function hackerNews({ title }, ctx) {
   const key = `hn:${slug(title)}`;
-  return cached(key, async () => {
+  const get = fetcher('hn', ctx);
+  return cached(key, get, async () => {
     const q = encodeURIComponent(`"${title}"`);
     const yearAgo = Math.floor(Date.now() / 1000) - 365 * 86400;
-    const [all, recent] = await Promise.all([
-      getJSON(`${SOURCES.hn}?query=${q}&tags=(story,comment)&hitsPerPage=1`),
-      getJSON(`${SOURCES.hn}?query=${q}&tags=(story,comment)&hitsPerPage=1&numericFilters=created_at_i>${yearAgo}`),
+    const [{ data: all }, { data: recent }] = await Promise.all([
+      get(`${SOURCES.hn}?query=${q}&tags=(story,comment)&hitsPerPage=1`),
+      get(`${SOURCES.hn}?query=${q}&tags=(story,comment)&hitsPerPage=1&numericFilters=created_at_i>${yearAgo}`),
     ]);
     if (!all) return null;
     return { total: all.nbHits || 0, recent: recent?.nbHits || 0 };
@@ -335,11 +435,12 @@ export function hackerNews({ title }) {
 /* The keyless quota is a shared anonymous pool that is frequently exhausted,
    so this is never load-bearing — it only ever adds a description/categories. */
 
-export function googleBooks({ title, author }) {
+export function googleBooks({ title, author }, ctx) {
   const key = `gb:${slug(title)}:${slug(author || '')}`;
-  return cached(key, async () => {
+  const get = fetcher('gb', ctx);
+  return cached(key, get, async () => {
     const q = `intitle:${title}` + (author ? `+inauthor:${author}` : '');
-    const data = await getJSON(`${SOURCES.googleBooks}?q=${encodeURIComponent(q)}&maxResults=3`, { timeout: 6000 });
+    const { data } = await get(`${SOURCES.googleBooks}?q=${encodeURIComponent(q)}&maxResults=3`, { timeout: 6000 });
     const v = data?.items?.[0]?.volumeInfo;
     if (!v) return null;
     return {
@@ -353,18 +454,29 @@ export function googleBooks({ title, author }) {
 }
 
 /** Fetch every signal for one book. Sources run in parallel; pageviews chains
- *  off the Wikipedia lookup because it needs the resolved article title. */
+ *  off the Wikipedia lookup because it needs the resolved article title.
+ *
+ *  `failed` lists the sources with at least one failed request for this book,
+ *  which is how a caller tells "no Wikipedia article" from "Wikipedia did not
+ *  answer". */
 export async function gatherSignals(seed) {
+  const ctx = { failed: new Set() };
   const [ol, wiki, hn, gb] = await Promise.all([
-    openLibrary(seed),
-    wikipedia(seed),
-    hackerNews(seed),
-    googleBooks(seed),
+    openLibrary(seed, ctx),
+    wikipedia(seed, ctx),
+    hackerNews(seed, ctx),
+    googleBooks(seed, ctx),
   ]);
   // Both of these need the resolved Wikipedia article title, so they chain.
-  const [pv, adapt] = await Promise.all([
-    pageviews(wiki?.pageKey),
-    adaptations(seed, wiki?.page),
-  ]);
-  return { seed, ol, wiki, pv, hn, gb, adapt, fetchedAt: Date.now() };
+  // If the lookup failed there is no title to chain from, and an adaptation
+  // check run without the article would read "clear" off half the evidence —
+  // so both stay unknown rather than guessed.
+  const wikiDown = !wiki && ctx.failed.has('wiki');
+  const [pv, adapt] = wikiDown
+    ? [null, null]
+    : await Promise.all([
+      pageviews(wiki?.pageKey, ctx),
+      adaptations(seed, wiki?.page, ctx),
+    ]);
+  return { seed, ol, wiki, pv, hn, gb, adapt, failed: [...ctx.failed], fetchedAt: Date.now() };
 }

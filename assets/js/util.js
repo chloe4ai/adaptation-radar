@@ -1,4 +1,4 @@
-import { CACHE_TTL_MS, FETCH_TIMEOUT_MS } from './config.js';
+import { CACHE_TTL_MS, FETCH_TIMEOUT_MS, USER_AGENT } from './config.js';
 
 export const clamp = (n, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
 
@@ -32,38 +32,115 @@ export const escapeHtml = (s) =>
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* ---------- fetch policy: retries, Retry-After cap, per-host spacing ---------- */
+
 /**
- * Fetch JSON with a timeout, retrying transient failures.
+ * Browser defaults stay modest: a person is watching the board fill in, and
+ * waiting 40 s on one Retry-After is worse than showing that title as partial.
+ * The harvester has no one waiting, so it raises the cap (see configureFetch).
+ */
+const fetchPolicy = {
+  retries: 2,
+  maxRetryAfterMs: 4000,
+  hostSpacingMs: 250,
+};
+
+/** Override the fetch policy, e.g. `{ retries: 3, maxRetryAfterMs: 60000 }`. */
+export function configureFetch(opts = {}) {
+  Object.assign(fetchPolicy, opts);
+  return { ...fetchPolicy };
+}
+
+// Wikipedia and Wikimedia answer bursts with 429s, so requests to them are
+// spaced per host. Other sources (Open Library, HN, Google Books) are not.
+const THROTTLED_HOST_RE = /(^|\.)(wikipedia|wikimedia)\.org$/i;
+const nextSlot = new Map();   // host -> earliest time the next request may start
+
+function hostOf(url) {
+  try { return new URL(url).hostname; } catch { return ''; }
+}
+
+/** Reserve the next slot for `host` and wait for it. */
+async function throttle(host) {
+  if (!THROTTLED_HOST_RE.test(host)) return;
+  const now = Date.now();
+  const at = Math.max(now, nextSlot.get(host) || 0);
+  nextSlot.set(host, at + fetchPolicy.hostSpacingMs);
+  if (at > now) await sleep(at - now);
+}
+
+/** Hold the whole host back, so concurrent workers do not walk into the same 429. */
+function backOffHost(host, ms) {
+  if (!THROTTLED_HOST_RE.test(host)) return;
+  nextSlot.set(host, Math.max(nextSlot.get(host) || 0, Date.now() + ms));
+}
+
+/** Retry-After is either delta-seconds or an HTTP date. */
+function retryAfterMs(res) {
+  const h = res.headers.get('retry-after');
+  if (!h) return NaN;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return secs * 1000;
+  return Date.parse(h) - Date.now();
+}
+
+/**
+ * Only *.wikipedia.org gets Api-User-Agent from the browser. It is not a
+ * CORS-safelisted header, so it forces a preflight: en.wikipedia.org answers
+ * that preflight (api.php and rest_v1 both list api-user-agent), but the
+ * wikimedia.org pageviews API answers OPTIONS with 405, which would make the
+ * browser drop every pageviews call. In Node there is no preflight, and the
+ * harvester sets a real User-Agent on every request anyway.
+ */
+function requestHeaders(host) {
+  const headers = { Accept: 'application/json' };
+  if (/(^|\.)wikipedia\.org$/i.test(host)) headers['Api-User-Agent'] = USER_AGENT;
+  return headers;
+}
+
+/**
+ * Fetch JSON with a timeout, retrying transient failures, and say whether the
+ * source actually answered.
  *
  * Retrying matters more than it looks: a single dropped request silently
  * zeroes a whole factor (a failed pageviews call costs a book 25% of its
- * score), and the failure is invisible because the result just reads as
- * "no data". Permanent failures (404, 400) are not retried.
- *
- * Returns null once retries are exhausted, so one dead source degrades a
- * book's confidence rather than failing the scan.
+ * score). Worse, a failure that reads as "no data" gets written down as a
+ * fact — an adaptation check that never ran reads as "lane clear". So this
+ * returns `{ ok: true, data }` when the source answered (data is null for a
+ * 404: the source answered "nothing here") and `{ ok: false, status }` when
+ * it did not (429/5xx after retries, other 4xx, network error, timeout).
  */
-export async function getJSON(url, { timeout = FETCH_TIMEOUT_MS, retries = 2 } = {}) {
+export async function getJSON(url, { timeout = FETCH_TIMEOUT_MS, retries = fetchPolicy.retries } = {}) {
+  const host = hostOf(url);
+  let status = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    await throttle(host);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
-      const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
-      if (res.ok) return await res.json();
-      // 4xx other than 429 means the request itself is wrong — retrying won't help.
-      if (res.status !== 429 && res.status < 500) return null;
-      if (attempt === retries) return null;
-      const retryAfter = Number(res.headers.get('retry-after')) * 1000;
-      await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 4000) : 400 * 2 ** attempt);
+      const res = await fetch(url, { signal: ctrl.signal, headers: requestHeaders(host) });
+      status = res.status;
+      if (res.ok) return { ok: true, data: await res.json() };
+      // 404 is an answer: the article or record does not exist.
+      if (res.status === 404) return { ok: true, data: null };
+      // Other 4xx (except 429) mean the request itself is wrong — retrying won't help.
+      if (res.status !== 429 && res.status < 500) return { ok: false, status };
+      if (attempt === retries) return { ok: false, status };
+      const asked = retryAfterMs(res);
+      const wait = Number.isFinite(asked) && asked > 0
+        ? Math.min(asked, fetchPolicy.maxRetryAfterMs)
+        : 400 * 2 ** attempt;
+      backOffHost(host, wait);
+      await sleep(wait);
     } catch {
-      // Network error or timeout — worth one more try.
-      if (attempt === retries) return null;
+      // Network error, timeout or unparseable body — worth one more try.
+      if (attempt === retries) return { ok: false, status };
       await sleep(400 * 2 ** attempt);
     } finally {
       clearTimeout(timer);
     }
   }
-  return null;
+  return { ok: false, status };
 }
 
 /* ---------- signal cache (localStorage, TTL'd) ---------- */

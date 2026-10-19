@@ -1,5 +1,6 @@
 import { getApiKey } from './store.js';
 import { FACTOR_LABELS } from './score.js';
+import { displayTitle } from './sources.js';
 
 /**
  * Two pitch generators:
@@ -15,7 +16,7 @@ import { FACTOR_LABELS } from './score.js';
 export function buildTemplatedPitch(book) {
   const { signals, score, format } = book;
   const { ol, wiki, gb, pv } = signals;
-  const title = ol?.title || book.seed.title;
+  const title = displayTitle(signals);
   const author = ol?.authors?.[0] || book.seed.author || 'Unknown';
   const year = ol?.year;
 
@@ -84,7 +85,7 @@ function buildUserPrompt(book) {
   const { signals, score, format } = book;
   const { ol, wiki, pv, hn, gb } = signals;
   const facts = [
-    `Title: ${ol?.title || book.seed.title}`,
+    `Title: ${displayTitle(signals)}`,
     `Author: ${ol?.authors?.join(', ') || book.seed.author || 'unknown'}`,
     `First published: ${ol?.year ?? 'unknown'}`,
     `Page count (median edition): ${ol?.pages ?? gb?.pages ?? 'unknown'}`,
