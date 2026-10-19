@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    # The daily harvest commits only data; there is no code to test in those.
+    paths-ignore:
+      - 'data/history/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Explicit file list rather than a bare directory: Node 21+ reads
+      # `--test` arguments as globs and no longer expands `tests/`.
+      - name: Test
+        run: node --test tests/*.test.mjs

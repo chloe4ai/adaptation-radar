@@ -1,5 +1,7 @@
 # Adaptation Radar
 
+[![CI](https://github.com/chloe4ai/adaptation-radar/actions/workflows/ci.yml/badge.svg)](https://github.com/chloe4ai/adaptation-radar/actions/workflows/ci.yml)
+
 **Rank by the slope of attention, not the level. The level is already priced in.**
 
 A scoring problem: fuse six noisy, partly-missing public signals into one 0–100 ranking and make movement in that ranking legible — in the browser, no backend, no dataset, no API key. The test case is books that could travel to film or television; the books are the fixture, the method is the point.
@@ -50,6 +52,7 @@ No build step; GitHub Pages serves it as-is (`.nojekyll` included). Signals cach
 python3 -m http.server 4788                       # then open localhost:4788
 node tools/harvest.mjs                            # snapshot -> data/history/ (Node 18+, no deps)
 node tools/harvest.mjs --limit 8 --out /tmp/aps   # subset while iterating; keeps data/history untouched
+node --test tests/*.test.mjs                      # scoring, source-matching and history tests (no deps)
 ```
 
 Edit [`data/slate.json`](data/slate.json) for the default slate, or add titles from the UI. Coverage text is templated and labelled as such; an Anthropic key in Settings swaps in a live `claude-opus-5` call from the browser — local use only, since a browser-side key is visible to anyone at that browser.
