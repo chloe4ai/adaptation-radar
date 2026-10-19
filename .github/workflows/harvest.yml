@@ -35,7 +35,12 @@ jobs:
           node-version: '20'
 
       - name: Harvest
-        run: node tools/harvest.mjs --limit "${{ github.event.inputs.limit || 0 }}"
+        # The input reaches the shell as an environment variable, never as text
+        # spliced into the script. A limit above 0 is a dry run: the harvester
+        # writes to a scratch directory and the commit step finds nothing.
+        env:
+          LIMIT: ${{ github.event.inputs.limit || '0' }}
+        run: node tools/harvest.mjs --limit "$LIMIT"
 
       - name: Commit snapshot
         run: |

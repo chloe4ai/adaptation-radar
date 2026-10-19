@@ -17,7 +17,7 @@ A book at 71 that was 52 three weeks ago is a different call from one that has s
 `tools/harvest.mjs` shims `localStorage` and calls the real `gatherSignals` and `scoreBook`. A trend line computed by different code than the current score drifts, and a drifting trend line is worse than none.
 
 **3. A snapshot is refused rather than written thin.**
-`gatherSignals` resolves even when every adapter returned `null`, which is right in the browser: one dead source should only dent a book's confidence. On a schedule it is a trap: a blip yields a slate of well-formed zeros the chart renders as the day the book market collapsed. So the harvester exits non-zero under three checks — 60% of the slate resolved, 60% of those carrying a live signal, mean confidence 0.35. A missing day is honest; a day of zeros is a lie the chart keeps telling.
+`gatherSignals` resolves even when every adapter returned `null`, which is right in the browser: one dead source should only dent a book's confidence. On a schedule it is a trap: a blip yields a slate of well-formed zeros the chart renders as the day the book market collapsed. So the harvester exits non-zero under four checks — 60% of the slate resolved, 60% of those carrying a live signal, mean confidence 0.35, and no more than 15% of Wikipedia or pageviews requests failing (a rate-limited Wikipedia otherwise passes the first three while zeroing momentum and marking every lane clear). Each snapshot records per-source ok/fail counts. A missing day is honest; a day of zeros is a lie the chart keeps telling.
 
 **4. Missing data lowers confidence. It is never imputed.**
 Every factor returns a 0–1 confidence beside its score and composite confidence is their weighted average, so a book scored off two working sources reads as thin — flagged below 55% — not authoritative. Weights are sliders, and each snapshot stores the weights that made it: a delta is only comparable inside one weights regime.
@@ -47,9 +47,9 @@ A static site can only call APIs that are CORS-open and keyless, which rules mos
 No build step; GitHub Pages serves it as-is (`.nojekyll` included). Signals cache in `localStorage` for 6 hours, scanned 4 at a time on a 12s fetch timeout.
 
 ```bash
-python3 -m http.server 4788                  # then open localhost:4788
-node tools/harvest.mjs                       # snapshot -> data/history/ (Node 18+, no deps)
-node tools/harvest.mjs --limit 8 --keep 30   # subset while iterating; shorter window
+python3 -m http.server 4788                       # then open localhost:4788
+node tools/harvest.mjs                            # snapshot -> data/history/ (Node 18+, no deps)
+node tools/harvest.mjs --limit 8 --out /tmp/aps   # subset while iterating; keeps data/history untouched
 ```
 
 Edit [`data/slate.json`](data/slate.json) for the default slate, or add titles from the UI. Coverage text is templated and labelled as such; an Anthropic key in Settings swaps in a live `claude-opus-5` call from the browser — local use only, since a browser-side key is visible to anyone at that browser.

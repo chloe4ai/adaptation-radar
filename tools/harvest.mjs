@@ -18,10 +18,14 @@
  * code than the current score is worse than no trend line at all.
  *
  *   node tools/harvest.mjs [--limit N] [--out data/history] [--keep 120]
+ *
+ * `--limit` without `--out` is a dry run: the snapshot goes to a scratch
+ * directory, and data/history (files, prune, index) is left alone.
  */
 
-import { writeFile, mkdir, readdir, readFile, unlink } from 'node:fs/promises';
+import { writeFile, appendFile, mkdir, readdir, readFile, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -45,10 +49,25 @@ globalThis.localStorage = (() => {
   };
 })();
 
-const { gatherSignals } = await import('../assets/js/sources.js');
+const { gatherSignals, displayTitle, stats, resetStats } = await import('../assets/js/sources.js');
 const { scoreBook, recommendFormat } = await import('../assets/js/score.js');
-const { WEIGHTS_DEFAULT, SCAN_CONCURRENCY } = await import('../assets/js/config.js');
-const { pool, slug, round } = await import('../assets/js/util.js');
+const { WEIGHTS_DEFAULT, SCAN_CONCURRENCY, USER_AGENT } = await import('../assets/js/config.js');
+const { pool, slug, round, configureFetch } = await import('../assets/js/util.js');
+
+/**
+ * Wikimedia throttles anonymous clients hard (429 with Retry-After ~40 s), and
+ * Node's default User-Agent is anonymous. Identify every request.
+ */
+const baseFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers);
+  if (!headers.has('user-agent')) headers.set('User-Agent', USER_AGENT);
+  return baseFetch(input, { ...init, headers });
+};
+
+// Nobody is watching a scheduled run, so honour long Retry-After waits rather
+// than giving up after the browser's 4 s cap and recording a failure.
+configureFetch({ retries: 3, maxRetryAfterMs: 60000 });
 
 /* ------------------------------- arguments -------------------------------- */
 
@@ -58,7 +77,13 @@ const arg = (name, fallback) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
 const LIMIT = Number(arg('limit', 0)) || 0;
-const OUT = path.resolve(ROOT, arg('out', 'data/history'));
+// A subset run is a test, not a reading of the slate: unless an output was
+// named explicitly, keep it out of data/history so it cannot be committed as
+// the day's snapshot (or prune real ones).
+const PARTIAL = LIMIT > 0 && !argv.includes('--out');
+const OUT = PARTIAL
+  ? path.join(os.tmpdir(), 'adaptation-radar-partial')
+  : path.resolve(ROOT, arg('out', 'data/history'));
 const KEEP = Number(arg('keep', 120));
 
 /* --------------------------------- run ------------------------------------ */
@@ -67,7 +92,9 @@ const slate = JSON.parse(await readFile(path.join(ROOT, 'data/slate.json'), 'utf
 const seeds = LIMIT ? slate.slice(0, LIMIT) : slate;
 
 console.log(`harvesting ${seeds.length} titles at concurrency ${SCAN_CONCURRENCY}`);
+if (PARTIAL) console.log(`partial run, not written to data/history (output: ${OUT})`);
 const started = Date.now();
+resetStats();
 let done = 0;
 
 const results = await pool(seeds, SCAN_CONCURRENCY, gatherSignals, () => {
@@ -90,7 +117,7 @@ for (const signals of results) {
   const format = recommendFormat(signals, score.factors);
   books.push({
     id: slug(`${signals.seed.title}-${signals.seed.author || ''}`),
-    title: signals.ol?.title || signals.seed.title,
+    title: displayTitle(signals),
     author: signals.ol?.authors?.[0] || signals.seed.author || '',
     aps: score.aps,
     confidence: score.confidence,
@@ -104,8 +131,28 @@ for (const signals of results) {
   });
 }
 
+/* ---------------------------- source summary ------------------------------ */
+
+const failRate = (s) => (s.ok + s.fail ? s.fail / (s.ok + s.fail) : 0);
+const sources = Object.fromEntries(Object.entries(stats).map(([k, v]) => [k, { ok: v.ok, fail: v.fail }]));
+
+console.log('source requests (ok / fail / fail rate):');
+for (const [k, v] of Object.entries(sources)) {
+  console.log(`  ${k.padEnd(6)} ${String(v.ok).padStart(4)} / ${String(v.fail).padStart(4)} / ${(failRate(v) * 100).toFixed(1)}%`);
+}
+if (process.env.GITHUB_STEP_SUMMARY) {
+  const rows = Object.entries(sources)
+    .map(([k, v]) => `| ${k} | ${v.ok} | ${v.fail} | ${(failRate(v) * 100).toFixed(1)}% |`)
+    .join('\n');
+  await appendFile(
+    process.env.GITHUB_STEP_SUMMARY,
+    `### Harvest sources (${seeds.length} titles${PARTIAL ? ', partial run' : ''})\n\n` +
+    `| source | ok | fail | fail rate |\n|---|---|---|---|\n${rows}\n\n`
+  );
+}
+
 /**
- * Two guards, because "resolved" and "actually got data" are different things
+ * Three guards, because "resolved" and "actually got data" are different things
  * and only the second one protects the trend line. A missing day is honest; a
  * day of zeros is a lie the chart will keep telling.
  */
@@ -124,6 +171,18 @@ if (meanConfidence < 0.35) {
   console.error(`mean confidence ${meanConfidence.toFixed(2)} is too low to snapshot — partial outage`);
   process.exit(1);
 }
+// Momentum and whitespace both hang off Wikipedia. When it rate-limits, every
+// title still "resolves" through Open Library and HN, so the gates above pass
+// — and the snapshot records momentum 0 and "lane clear" across the board.
+// The per-source failure rate is the only gate that sees that outage.
+const MAX_FAIL_RATE = 0.15;
+const throttled = ['wiki', 'pv'].filter((k) => failRate(sources[k]) > MAX_FAIL_RATE);
+if (throttled.length) {
+  console.error(throttled.map((k) =>
+    `${k}: ${sources[k].fail}/${sources[k].ok + sources[k].fail} requests failed (${(failRate(sources[k]) * 100).toFixed(1)}%)`
+  ).join('; ') + ` — above the ${MAX_FAIL_RATE * 100}% limit; refusing to write`);
+  process.exit(1);
+}
 
 books.sort((a, b) => b.aps - a.aps);
 
@@ -137,11 +196,18 @@ const snapshot = {
   liveSignal: live,
   meanConfidence: round(meanConfidence, 3),
   durationMs: Date.now() - started,
+  sources,
   books,
 };
 
 await mkdir(OUT, { recursive: true });
 await writeFile(path.join(OUT, `${date}.json`), JSON.stringify(snapshot) + '\n');
+
+if (PARTIAL) {
+  console.log(`wrote ${path.join(OUT, `${date}.json`)} — ${books.length}/${seeds.length} resolved in ${Math.round(snapshot.durationMs / 1000)}s`);
+  console.log('partial run, not written to data/history (no prune, no index)');
+  process.exit(0);
+}
 
 /* ------------------------------ index + prune ------------------------------ */
 
